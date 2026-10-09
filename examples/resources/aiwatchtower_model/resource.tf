@@ -1,5 +1,5 @@
 # Copyright (c) InsightFinder Inc.
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 # Minimal model: no data sources, nothing provisioned in UIE.
 resource "aiwatchtower_model" "basic" {

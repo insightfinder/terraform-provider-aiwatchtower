@@ -13,7 +13,7 @@ Manages an AI WatchTower model. A model is identified by the (user_name, model_n
 
 ```terraform
 # Copyright (c) InsightFinder Inc.
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 # Minimal model: no data sources, nothing provisioned in UIE.
 resource "aiwatchtower_model" "basic" {

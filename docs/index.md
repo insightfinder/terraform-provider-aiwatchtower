@@ -13,7 +13,7 @@ Interact with the InsightFinder AI WatchTower API.
 
 ```terraform
 # Copyright (c) InsightFinder Inc.
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 terraform {
   required_providers {
