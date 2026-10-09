@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - run: go mod download
+      - run: go build -v ./...
+      - name: Check gofmt
+        run: |
+          fmtout=$(gofmt -l ./internal ./main.go)
+          test -z "$fmtout" || (echo "$fmtout" && echo "Run gofmt -w" && exit 1)
+      - run: go vet ./...
+
+  test:
+    name: Unit Tests
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - run: go test -v -cover -timeout=5m ./...
+
+  provider-check:
+    name: Terraform Provider Checks
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: Install terraform-plugin-docs
+        run: go install github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@latest
+      - name: Validate documentation
+        run: tfplugindocs validate
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || \
+          (echo "go.mod or go.sum differs after 'go mod tidy'" && exit 1)

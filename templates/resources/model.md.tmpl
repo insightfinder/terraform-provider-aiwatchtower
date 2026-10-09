@@ -1,0 +1,46 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+{{ tffile (printf "examples/resources/%s/resource.tf" .Name) }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the following syntax:
+
+{{ codefile "shell" (printf "examples/resources/%s/import.sh" .Name) }}
+
+## Notes
+
+- **`data_sources[].name` is a suffix, not a project name.** AI WatchTower derives the UIE project
+  name as `sanitize("<model_name>-<model_version>-<name>")` and does not check the result against
+  UIE. Supplying an already-qualified project name therefore yields a doubled prefix such as
+  `Fraud-Guard-V1-0-0-Fraud-Guard-V1-0-0-OutputLog`, which resolves to nothing: every downstream
+  call 204s and monitors become uncreatable. The backend's `existInUIE` flag, which is the only
+  way to reach that code path, is intentionally not exposed by this resource.
+
+- **Project provisioning is asynchronous.** Creating or updating a model with new `data_sources`
+  only enqueues a setup payload; a background consumer creates the UIE projects, adds them to a
+  system and writes the mapping rows. A successful apply means the model record exists, not that
+  its projects are ready. The resource emits a warning when it enqueues this work.
+
+- **Changing `model_version` does not replace the resource.** The provider sends the previous
+  version as the backend's `oldModelVersion`, which triggers an in-place rename: the model record,
+  its mapping relation and its monitors all move, and the backend issues a fresh `model_id`.
+  Changing `model_name` or `user_name` does force replacement.
+
+- **Deleting a model that is already gone is not an error.** The backend reports success only when
+  every key in a delete request was removed, so deleting an absent model fails the whole call. The
+  provider re-reads the model after a failed delete and treats "not found" as success, which keeps
+  `terraform destroy` working after someone has removed the model by hand.
