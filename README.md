@@ -76,6 +76,27 @@ See [the resource docs](docs/resources/model.md) for the full field list.
 
 - [`aiwatchtower_model`](docs/resources/model.md) - Manage AI WatchTower models
 
+## Reliability
+
+Every API call is bounded by a 60-second per-attempt timeout and is cancelled when Terraform is
+interrupted.
+
+A failed call is retried up to three times with exponential backoff (1s, 2s, 4s, jittered), but
+only when retrying is both safe and useful:
+
+- **Retried:** connection failures, `408`, `429` and `5xx`, for `GET`, `PUT` and `DELETE`. Those
+  methods converge on the same end state however often they are repeated.
+- **Not retried:** `POST`. A create whose response was lost has still happened, and sending it
+  again comes back as a spurious "model already exists" — true of a dropped connection as much
+  as of a `500`, since neither says whether the server acted.
+- **Never retried:** other `4xx` responses. A rejected key, a missing parameter or a conflicting
+  model will be rejected identically every time; retrying only delays the real error.
+
+After a write, the model is read back to populate the computed attributes, with a short retry in
+case the read lands on a replica that has not caught up. If that read still fails, the resource is
+written to state anyway — the model exists at that point, and omitting it would leave it stranded
+outside Terraform, where the next apply would be rejected as a conflict.
+
 ## Known Limitations
 
 **Data source projects are created asynchronously.** Creating a model with `data_sources` enqueues

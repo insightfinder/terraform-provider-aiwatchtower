@@ -5,8 +5,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -26,6 +28,14 @@ var (
 	_ resource.Resource                = &modelResource{}
 	_ resource.ResourceWithConfigure   = &modelResource{}
 	_ resource.ResourceWithImportState = &modelResource{}
+)
+
+const (
+	// readBackAttempts is how many times a write is followed by a read before the model is
+	// declared missing.
+	readBackAttempts = 3
+	// readBackDelay separates those attempts.
+	readBackDelay = 500 * time.Millisecond
 )
 
 // NewModelResource is a helper function to simplify the provider implementation.
@@ -202,27 +212,27 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	if err := r.client.CreateModel(config); err != nil {
+	if err := r.client.CreateModel(ctx, config); err != nil {
 		resp.Diagnostics.AddError("Error Creating Model", "Could not create model: "+err.Error())
 		return
 	}
 
 	if len(config.DataSources) > 0 {
-		resp.Diagnostics.AddWarning(
-			"Data Source Projects Are Provisioned Asynchronously",
-			"AI WatchTower enqueues project creation on a message queue and completes it in the background, so the UIE projects backing this model's data sources may not exist yet even though the apply succeeded. "+
-				"Allow time for them to appear before creating monitors against them.",
-		)
-	}
-
-	// Read back so computed attributes (model_id, anomaly_count, monitor_info) are populated
-	// from the backend rather than guessed.
-	if diags := r.readIntoModel(ctx, &plan, userName); diags.HasError() {
-		resp.Diagnostics.Append(diags...)
-		return
+		resp.Diagnostics.Append(asyncProvisioningWarning())
 	}
 
 	plan.ID = types.StringValue(modelID(userName, plan.ModelName.ValueString(), plan.ModelVersion.ValueString()))
+
+	// Read back so the Computed attributes come from the backend rather than being guessed.
+	if diags := r.refreshComputed(ctx, &plan, userName); diags.HasError() {
+		// The model was created; failing here without writing state would strand it, and the next
+		// apply would be rejected with a conflict. Persist what is known, zero the Computed
+		// attributes so the state is valid, and still report the failure.
+		setComputedUnknownAsEmpty(&plan)
+		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+		resp.Diagnostics.Append(diags...)
+		return
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -240,7 +250,7 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		userName = r.client.Username
 	}
 
-	config, err := r.client.GetModel(userName, state.ModelName.ValueString(), state.ModelVersion.ValueString())
+	config, err := r.client.GetModel(ctx, userName, state.ModelName.ValueString(), state.ModelVersion.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error Reading Model", "Could not read model: "+err.Error())
 		return
@@ -286,23 +296,43 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	// update path.
 	oldVersion := state.ModelVersion.ValueString()
 
+	// On the update path the backend provisions a data source only when it is flagged as new:
+	// ModelService.update gates the whole setup payload on hasNewDataSource(), and ModelSetupService
+	// then skips any entry whose isNew is false. Without this, adding a data source to an existing
+	// model would be recorded in the metadata and silently never given a UIE project. Entries that
+	// were already in state are left alone so their projects are not re-provisioned.
+	known, d := dataSourceNames(ctx, state.DataSources)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	markNewDataSources(config, known)
+
+	if anyNewDataSource(config) {
+		resp.Diagnostics.Append(asyncProvisioningWarning())
+	}
+
 	tflog.Debug(ctx, "Updating AI WatchTower model", map[string]interface{}{
 		"model_name":  plan.ModelName.ValueString(),
 		"old_version": oldVersion,
 		"new_version": plan.ModelVersion.ValueString(),
 	})
 
-	if err := r.client.UpdateModel(config, oldVersion); err != nil {
+	if err := r.client.UpdateModel(ctx, config, oldVersion); err != nil {
 		resp.Diagnostics.AddError("Error Updating Model", "Could not update model: "+err.Error())
 		return
 	}
 
-	if diags := r.readIntoModel(ctx, &plan, userName); diags.HasError() {
+	plan.ID = types.StringValue(modelID(userName, plan.ModelName.ValueString(), plan.ModelVersion.ValueString()))
+
+	if diags := r.refreshComputed(ctx, &plan, userName); diags.HasError() {
+		// The update already landed, including a possible version rename, so state must move with
+		// it even though the read-back failed — otherwise state still points at the old version.
+		setComputedUnknownAsEmpty(&plan)
+		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 		resp.Diagnostics.Append(diags...)
 		return
 	}
-
-	plan.ID = types.StringValue(modelID(userName, plan.ModelName.ValueString(), plan.ModelVersion.ValueString()))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -325,7 +355,7 @@ func (r *modelResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		"model_version": state.ModelVersion.ValueString(),
 	})
 
-	if err := r.client.DeleteModel(userName, state.ModelName.ValueString(), state.ModelVersion.ValueString()); err != nil {
+	if err := r.client.DeleteModel(ctx, userName, state.ModelName.ValueString(), state.ModelVersion.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Error Deleting Model", "Could not delete model: "+err.Error())
 		return
 	}
@@ -333,32 +363,85 @@ func (r *modelResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 
 // ImportState imports the resource state.
 func (r *modelResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	// Split from the right: a user name may legitimately contain "@" (it is often an email), so
-	// only the final two separators are structural.
-	lastSep := strings.LastIndex(req.ID, "@")
-	if lastSep <= 0 || lastSep == len(req.ID)-1 {
-		resp.Diagnostics.AddError(
-			"Invalid Import ID",
-			"Import ID must be in the format: user_name@model_name@model_version, for example user@company.com@Fraud-Guard@V1.0.0",
-		)
-		return
-	}
-	firstPart := req.ID[:lastSep]
-	modelVersion := req.ID[lastSep+1:]
-
-	nameSep := strings.LastIndex(firstPart, "@")
-	if nameSep <= 0 || nameSep == len(firstPart)-1 {
-		resp.Diagnostics.AddError(
-			"Invalid Import ID",
-			"Import ID must be in the format: user_name@model_name@model_version, for example user@company.com@Fraud-Guard@V1.0.0",
-		)
+	userName, modelName, modelVersion, err := parseModelImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid Import ID", err.Error())
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("user_name"), firstPart[:nameSep])...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("model_name"), firstPart[nameSep+1:])...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("user_name"), userName)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("model_name"), modelName)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("model_version"), modelVersion)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+}
+
+// parseModelImportID splits "user_name@model_name@model_version".
+//
+// The split runs from the right because an AI WatchTower user name is routinely an email address
+// and therefore contains an "@" of its own: only the last two separators are structural. Splitting
+// on every "@" would reject every realistic import ID.
+func parseModelImportID(id string) (userName, modelName, modelVersion string, err error) {
+	const format = "import ID must be in the format user_name@model_name@model_version, " +
+		"for example user@company.com@Fraud-Guard@V1.0.0"
+
+	versionSep := strings.LastIndex(id, "@")
+	if versionSep <= 0 || versionSep == len(id)-1 {
+		return "", "", "", errors.New(format)
+	}
+	head, modelVersion := id[:versionSep], id[versionSep+1:]
+
+	nameSep := strings.LastIndex(head, "@")
+	if nameSep <= 0 || nameSep == len(head)-1 {
+		return "", "", "", errors.New(format)
+	}
+
+	return head[:nameSep], head[nameSep+1:], modelVersion, nil
+}
+
+// dataSourceNames collects the data source names recorded in state.
+func dataSourceNames(ctx context.Context, list types.List) (map[string]bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	names := map[string]bool{}
+	if list.IsNull() || list.IsUnknown() {
+		return names, diags
+	}
+	var models []modelDataSourceModel
+	diags.Append(list.ElementsAs(ctx, &models, false)...)
+	if diags.HasError() {
+		return names, diags
+	}
+	for _, m := range models {
+		names[m.Name.ValueString()] = true
+	}
+	return names, diags
+}
+
+// markNewDataSources flags every data source that is not already known to the backend, which is
+// what makes the update path provision its UIE project.
+func markNewDataSources(config *client.ModelConfig, known map[string]bool) {
+	for i := range config.DataSources {
+		config.DataSources[i].IsNew = !known[config.DataSources[i].Name]
+	}
+}
+
+// anyNewDataSource reports whether this write asks the backend to provision a project.
+func anyNewDataSource(config *client.ModelConfig) bool {
+	for _, ds := range config.DataSources {
+		if ds.IsNew {
+			return true
+		}
+	}
+	return false
+}
+
+// asyncProvisioningWarning tells the operator that the apply finished before the backend did.
+func asyncProvisioningWarning() diag.Diagnostic {
+	return diag.NewWarningDiagnostic(
+		"Data Source Projects Are Provisioned Asynchronously",
+		"AI WatchTower enqueues project creation on a message queue and completes it in the background, "+
+			"so the UIE projects backing this model's data sources may not exist yet even though the apply "+
+			"succeeded. Allow time for them to appear before creating monitors against them.",
+	)
 }
 
 // modelID builds the resource's synthetic identifier.
@@ -402,75 +485,63 @@ func (r *modelResource) buildModelConfig(ctx context.Context, plan modelResource
 	return config, diags
 }
 
-// readIntoModel refreshes m from the backend after a write.
-func (r *modelResource) readIntoModel(ctx context.Context, m *modelResourceModel, userName string) diag.Diagnostics {
+// refreshComputed re-reads the model after a write and fills in only the Computed attributes.
+//
+// It deliberately does NOT copy the backend's view of the Optional attributes back over the plan.
+// Terraform requires every non-Computed attribute to come out of Apply exactly as it went into the
+// plan, so echoing a value the backend has normalised — a defaulted data_source, a trimmed
+// description — fails the whole apply with "Provider produced inconsistent result after apply".
+// Reconciling user-set attributes with reality is Read's job, where a difference is drift to be
+// reported rather than a contract violation.
+func (r *modelResource) refreshComputed(ctx context.Context, m *modelResourceModel, userName string) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	config, err := r.client.GetModel(userName, m.ModelName.ValueString(), m.ModelVersion.ValueString())
+	// The write is synchronous as far as the model record goes, but the read can still miss it if
+	// it lands on a Cassandra replica that has not caught up. A handful of quick retries covers
+	// that without turning a genuinely missing model into a long stall. The HTTP-level retry in
+	// the client does not help here: this is a well-formed 200 carrying an empty list.
+	var config *client.ModelConfig
+	var err error
+	for attempt := 0; attempt < readBackAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				diags.AddError("Error Reading Model", "Cancelled while reading the model back: "+ctx.Err().Error())
+				return diags
+			case <-time.After(readBackDelay):
+			}
+		}
+
+		config, err = r.client.GetModel(ctx, userName, m.ModelName.ValueString(), m.ModelVersion.ValueString())
+		if err != nil || config != nil {
+			break
+		}
+	}
+
 	if err != nil {
-		diags.AddError("Error Reading Model", "Could not read model back after write: "+err.Error())
+		diags.AddError("Error Reading Model", "Could not read the model back after writing it: "+err.Error())
 		return diags
 	}
 	if config == nil {
 		diags.AddError(
 			"Model Not Found After Write",
-			fmt.Sprintf("The model %q (version %q) could not be read back immediately after being written.",
+			fmt.Sprintf("Model %q (version %q) could not be read back immediately after being written. "+
+				"The write itself reported success, so the model most likely exists; run \"terraform plan\" to reconcile.",
 				m.ModelName.ValueString(), m.ModelVersion.ValueString()),
 		)
 		return diags
 	}
 
-	return r.applyConfigToModel(ctx, m, config)
+	diags.Append(setComputed(ctx, m, config)...)
+	return diags
 }
 
-// applyConfigToModel copies backend state onto the Terraform model.
-//
-// Only computed attributes are overwritten unconditionally. Optional attributes are left alone
-// when the backend reports them empty, so an omitted attribute does not flip between null and ""
-// on every refresh.
-func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResourceModel, config *client.ModelConfig) diag.Diagnostics {
+// setComputed writes the backend-owned attributes onto the model.
+func setComputed(ctx context.Context, m *modelResourceModel, config *client.ModelConfig) diag.Diagnostics {
 	var diags diag.Diagnostics
-
-	m.ModelName = types.StringValue(config.ModelName)
-	m.ModelVersion = types.StringValue(config.ModelVersion)
-	if config.ModelType != "" {
-		m.ModelType = types.StringValue(config.ModelType)
-	}
-	if config.Environment != "" {
-		m.Environment = types.StringValue(config.Environment)
-	}
-	if config.Description != "" {
-		m.Description = types.StringValue(config.Description)
-	}
 
 	m.ModelID = types.StringValue(config.ModelID)
 	m.AnomalyCount = types.Int64Value(config.AnomalyCount)
-
-	if config.UBLDimension != nil {
-		m.UBLDimension = types.Int64Value(*config.UBLDimension)
-	}
-
-	if len(config.DataSources) > 0 {
-		elems := make([]modelDataSourceModel, 0, len(config.DataSources))
-		for _, ds := range config.DataSources {
-			e := modelDataSourceModel{
-				Name:     types.StringValue(ds.Name),
-				DataType: types.StringValue(ds.DataType),
-			}
-			if ds.DataSource != "" {
-				e.DataSource = types.StringValue(ds.DataSource)
-			} else {
-				e.DataSource = types.StringNull()
-			}
-			elems = append(elems, e)
-		}
-		list, d := types.ListValueFrom(ctx, modelDataSourceObjectType(), elems)
-		diags.Append(d...)
-		if diags.HasError() {
-			return diags
-		}
-		m.DataSources = list
-	}
 
 	monitors := make([]monitorInfoModel, 0, len(config.MonitorInfo))
 	for _, mi := range config.MonitorInfo {
@@ -487,6 +558,69 @@ func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResource
 	m.MonitorInfo = monitorList
 
 	return diags
+}
+
+// setComputedUnknownAsEmpty fills the Computed attributes with empty values.
+//
+// Used only to persist a usable state after a write succeeded but the read-back did not: the
+// model exists in AI WatchTower, so leaving it out of state entirely would strand it — the next
+// apply would try to create it again and be rejected with a conflict. Computed attributes cannot
+// stay unknown once apply finishes, so they are zeroed here and corrected by the next refresh.
+func setComputedUnknownAsEmpty(m *modelResourceModel) {
+	m.ModelID = types.StringValue("")
+	m.AnomalyCount = types.Int64Value(0)
+	m.MonitorInfo = types.ListValueMust(monitorInfoObjectType(), []attr.Value{})
+}
+
+// applyConfigToModel copies the backend's full view onto the Terraform model. Used by Read, where
+// the point is to surface drift: an attribute the backend no longer has becomes null, so that a
+// value cleared outside Terraform shows up in the next plan instead of being masked by state.
+func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResourceModel, config *client.ModelConfig) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	m.ModelName = types.StringValue(config.ModelName)
+	m.ModelVersion = types.StringValue(config.ModelVersion)
+	m.ModelType = stringOrNull(config.ModelType)
+	m.Environment = stringOrNull(config.Environment)
+	m.Description = stringOrNull(config.Description)
+
+	if config.UBLDimension != nil {
+		m.UBLDimension = types.Int64Value(*config.UBLDimension)
+	} else {
+		m.UBLDimension = types.Int64Null()
+	}
+
+	if len(config.DataSources) > 0 {
+		elems := make([]modelDataSourceModel, 0, len(config.DataSources))
+		for _, ds := range config.DataSources {
+			elems = append(elems, modelDataSourceModel{
+				Name:       types.StringValue(ds.Name),
+				DataType:   types.StringValue(ds.DataType),
+				DataSource: stringOrNull(ds.DataSource),
+			})
+		}
+		list, d := types.ListValueFrom(ctx, modelDataSourceObjectType(), elems)
+		diags.Append(d...)
+		if diags.HasError() {
+			return diags
+		}
+		m.DataSources = list
+	} else {
+		m.DataSources = types.ListNull(modelDataSourceObjectType())
+	}
+
+	diags.Append(setComputed(ctx, m, config)...)
+	return diags
+}
+
+// stringOrNull maps the backend's empty string to a null attribute. The API has no way to
+// distinguish "unset" from "set to the empty string", so an omitted attribute and an explicitly
+// empty one both read back as null.
+func stringOrNull(v string) types.String {
+	if v == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(v)
 }
 
 // modelDataSourceObjectType mirrors the data_sources nested schema.

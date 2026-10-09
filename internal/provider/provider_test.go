@@ -9,6 +9,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+
+	"github.com/insightfinder/terraform-provider-aiwatchtower/internal/provider/client"
 )
 
 func TestProviderMetadata(t *testing.T) {
@@ -96,5 +98,116 @@ func TestModelID(t *testing.T) {
 	want := "user@company.com@Fraud-Guard@V1.0.0"
 	if got != want {
 		t.Errorf("modelID() = %q, want %q", got, want)
+	}
+}
+
+func TestParseModelImportID(t *testing.T) {
+	tests := []struct {
+		name                         string
+		id                           string
+		wantUser, wantModel, wantVer string
+		wantErr                      bool
+	}{
+		{
+			name:      "email user name",
+			id:        "user@company.com@Fraud-Guard@V1.0.0",
+			wantUser:  "user@company.com",
+			wantModel: "Fraud-Guard",
+			wantVer:   "V1.0.0",
+		},
+		{
+			name:      "plain user name",
+			id:        "service_account@tf-smoke@V0.0.1",
+			wantUser:  "service_account",
+			wantModel: "tf-smoke",
+			wantVer:   "V0.0.1",
+		},
+		{
+			name:      "model name containing a dash and dots in the version",
+			id:        "u@a-b-c@1.2.3",
+			wantUser:  "u",
+			wantModel: "a-b-c",
+			wantVer:   "1.2.3",
+		},
+		{name: "no separators", id: "justamodel", wantErr: true},
+		{name: "only one separator", id: "user@model", wantErr: true},
+		{name: "empty version", id: "user@model@", wantErr: true},
+		{name: "empty model name", id: "user@@V1", wantErr: true},
+		{name: "leading separator", id: "@model@V1", wantErr: true},
+		{name: "empty id", id: "", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			user, model, ver, err := parseModelImportID(tc.id)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseModelImportID(%q) = (%q, %q, %q, nil), want an error", tc.id, user, model, ver)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseModelImportID(%q): %v", tc.id, err)
+			}
+			if user != tc.wantUser || model != tc.wantModel || ver != tc.wantVer {
+				t.Errorf("parseModelImportID(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					tc.id, user, model, ver, tc.wantUser, tc.wantModel, tc.wantVer)
+			}
+		})
+	}
+}
+
+func TestParseModelImportIDRoundTripsModelID(t *testing.T) {
+	// The import ID and the resource's own id attribute must be the same string, otherwise an
+	// imported resource and a created one end up with different ids for the same model.
+	user, model, ver := "user@company.com", "Fraud-Guard", "V1.0.0"
+	id := modelID(user, model, ver)
+
+	gotUser, gotModel, gotVer, err := parseModelImportID(id)
+	if err != nil {
+		t.Fatalf("parseModelImportID(%q): %v", id, err)
+	}
+	if gotUser != user || gotModel != model || gotVer != ver {
+		t.Errorf("round trip of %q gave (%q, %q, %q)", id, gotUser, gotModel, gotVer)
+	}
+}
+
+func TestStringOrNull(t *testing.T) {
+	if v := stringOrNull(""); !v.IsNull() {
+		t.Error("an empty backend value must become null so that Read reports it as drift")
+	}
+	if v := stringOrNull("x"); v.ValueString() != "x" {
+		t.Errorf("stringOrNull(\"x\") = %q", v.ValueString())
+	}
+}
+
+func TestMarkNewDataSources(t *testing.T) {
+	config := &client.ModelConfig{
+		DataSources: []client.ModelDataSource{
+			{Name: "InputLog"},
+			{Name: "OutputLog"},
+		},
+	}
+	// InputLog is already in state; OutputLog is being added by this apply.
+	markNewDataSources(config, map[string]bool{"InputLog": true})
+
+	if config.DataSources[0].IsNew {
+		t.Error("an existing data source was flagged as new; its project would be re-provisioned")
+	}
+	// ModelService.update gates the whole setup payload on hasNewDataSource(), so without this
+	// flag the added data source never gets a UIE project and the apply silently does nothing.
+	if !config.DataSources[1].IsNew {
+		t.Error("an added data source was not flagged as new; the backend would not provision it")
+	}
+}
+
+func TestMarkNewDataSourcesWithNoPriorState(t *testing.T) {
+	config := &client.ModelConfig{DataSources: []client.ModelDataSource{{Name: "A"}, {Name: "B"}}}
+	markNewDataSources(config, map[string]bool{})
+
+	for i, ds := range config.DataSources {
+		if !ds.IsNew {
+			t.Errorf("data source %d was not flagged as new although state knows of none", i)
+		}
 	}
 }

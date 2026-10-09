@@ -4,6 +4,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -127,14 +128,14 @@ func errorMessage(body []byte) string {
 
 // GetModel fetches a single model by its (userName, modelName, modelVersion) identity.
 // Returns (nil, nil) when the model does not exist.
-func (c *Client) GetModel(userName, modelName, modelVersion string) (*ModelConfig, error) {
+func (c *Client) GetModel(ctx context.Context, userName, modelName, modelVersion string) (*ModelConfig, error) {
 	params := url.Values{}
 	params.Set("userName", userName)
 	params.Set("modelName", modelName)
 	params.Set("modelVersion", modelVersion)
 
 	path := fmt.Sprintf("/api/external/v1/model?%s", params.Encode())
-	body, statusCode, err := c.DoRequest("GET", path, nil)
+	body, statusCode, err := c.DoRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -193,14 +194,14 @@ func (c *Client) GetModel(userName, modelName, modelVersion string) (*ModelConfi
 // Project provisioning is asynchronous: the backend only enqueues a ModelSetupPayload on
 // RabbitMQ, and ModelSetupConsumer creates the UIE projects and mapping rows afterwards. A 200
 // here means the model record exists, not that its data sources are ready.
-func (c *Client) CreateModel(config *ModelConfig) error {
+func (c *Client) CreateModel(ctx context.Context, config *ModelConfig) error {
 	dto := config.toDTO("")
 	// Every data source is new on create; this is what makes the backend enqueue project setup.
 	for i := range dto.ModelMetadata.DataSources {
 		dto.ModelMetadata.DataSources[i].IsNew = true
 	}
 
-	body, statusCode, err := c.DoRequest("POST", "/api/external/v1/model", dto)
+	body, statusCode, err := c.DoRequest(ctx, "POST", "/api/external/v1/model", dto)
 	if err != nil {
 		return err
 	}
@@ -218,10 +219,10 @@ func (c *Client) CreateModel(config *ModelConfig) error {
 // in state; when it differs from config.ModelVersion the backend performs an in-place version
 // rename (moving the model record, its mapping relation and its monitors) instead of rejecting
 // the change.
-func (c *Client) UpdateModel(config *ModelConfig, oldVersion string) error {
+func (c *Client) UpdateModel(ctx context.Context, config *ModelConfig, oldVersion string) error {
 	dto := config.toDTO(oldVersion)
 
-	body, statusCode, err := c.DoRequest("PUT", "/api/external/v1/model", dto)
+	body, statusCode, err := c.DoRequest(ctx, "PUT", "/api/external/v1/model", dto)
 	if err != nil {
 		return err
 	}
@@ -234,13 +235,19 @@ func (c *Client) UpdateModel(config *ModelConfig, oldVersion string) error {
 
 // DeleteModel removes a model.
 //
-// The endpoint takes a list of keys and ModelService.deleteModels only reports success when every
-// one of them was deleted, so a key naming a model that is already gone fails the whole call with
-// HTTP 500. Terraform needs delete to be idempotent — destroying a resource somebody already
-// removed by hand must not error — so a failure is re-checked with a read: if the model is absent,
-// the desired state has been reached and the failure is the "already gone" case rather than a real
-// error.
-func (c *Client) DeleteModel(userName, modelName, modelVersion string) error {
+// The endpoint takes a list of keys and ModelService.deleteModels reports success only when
+// every one of them was deleted, so asking it to delete a model that is already gone fails the
+// whole call with HTTP 500 — a routine situation for Terraform, which must be able to destroy a
+// resource somebody already removed by hand. The existence check therefore comes first: it turns
+// the common "already gone" case into a no-op instead of an error that the retry layer would
+// also spend several seconds re-attempting. The check is repeated after a failed delete to cover
+// the case where the model disappeared between the two calls.
+func (c *Client) DeleteModel(ctx context.Context, userName, modelName, modelVersion string) error {
+	existing, err := c.GetModel(ctx, userName, modelName, modelVersion)
+	if err == nil && existing == nil {
+		return nil
+	}
+
 	payload := []map[string]string{{
 		"userName":  userName,
 		"modelName": modelName,
@@ -249,17 +256,15 @@ func (c *Client) DeleteModel(userName, modelName, modelVersion string) error {
 		"version": modelVersion,
 	}}
 
-	body, statusCode, err := c.DoRequest("DELETE", "/api/external/v1/model", payload)
+	body, statusCode, err := c.DoRequest(ctx, "DELETE", "/api/external/v1/model", payload)
 	if err != nil {
 		return err
 	}
-
 	if statusCode == 200 {
 		return nil
 	}
 
-	existing, readErr := c.GetModel(userName, modelName, modelVersion)
-	if readErr == nil && existing == nil {
+	if after, readErr := c.GetModel(ctx, userName, modelName, modelVersion); readErr == nil && after == nil {
 		return nil
 	}
 
