@@ -259,3 +259,27 @@ func TestErrorMessageFallsBackToRawBody(t *testing.T) {
 		t.Errorf("errorMessage = %q, want the trimmed raw body", got)
 	}
 }
+
+func TestGetModelSendsIdentityAsQueryParameters(t *testing.T) {
+	var got map[string][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	if _, err := c.GetModel(context.Background(), "u", "Fraud-Guard", "V1.0.0"); err != nil {
+		t.Fatalf("GetModel: %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"userName":     "u",
+		"modelName":    "Fraud-Guard",
+		"modelVersion": "V1.0.0",
+	} {
+		if len(got[key]) != 1 || got[key][0] != want {
+			t.Errorf("query parameter %s = %v, want [%q]", key, got[key], want)
+		}
+	}
+}
