@@ -18,12 +18,10 @@ import (
 	"github.com/insightfinder/terraform-provider-aiwatchtower/internal/provider/client"
 )
 
-// Ensure the implementation satisfies the expected interfaces.
 var (
 	_ provider.Provider = &aiWatchTowerProvider{}
 )
 
-// New is a helper function to simplify provider server and testing implementation.
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
 		return &aiWatchTowerProvider{
@@ -32,27 +30,21 @@ func New(version string) func() provider.Provider {
 	}
 }
 
-// aiWatchTowerProvider is the provider implementation.
 type aiWatchTowerProvider struct {
-	// version is set to the provider version on release, "dev" when the provider is built and
-	// run locally, and "test" when running acceptance testing.
 	version string
 }
 
-// aiWatchTowerProviderModel maps provider schema data to a Go type.
 type aiWatchTowerProviderModel struct {
 	BaseURL  types.String `tfsdk:"base_url"`
 	Username types.String `tfsdk:"username"`
 	APIKey   types.String `tfsdk:"api_key"`
 }
 
-// Metadata returns the provider type name.
 func (p *aiWatchTowerProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
 	resp.TypeName = "aiwatchtower"
 	resp.Version = p.version
 }
 
-// Schema defines the provider-level schema for configuration data.
 func (p *aiWatchTowerProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Interact with the InsightFinder AI WatchTower API.",
@@ -75,7 +67,6 @@ func (p *aiWatchTowerProvider) Schema(_ context.Context, _ provider.SchemaReques
 	}
 }
 
-// Configure prepares an AI WatchTower API client for data sources and resources.
 func (p *aiWatchTowerProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	tflog.Info(ctx, "Configuring AI WatchTower client")
 
@@ -167,7 +158,7 @@ func (p *aiWatchTowerProvider) Configure(ctx context.Context, req provider.Confi
 
 	ctx = tflog.SetField(ctx, "aiwatchtower_base_url", baseURL)
 	ctx = tflog.SetField(ctx, "aiwatchtower_username", username)
-	ctx = tflog.MaskFieldValuesWithFieldKeys(ctx, "aiwatchtower_api_key")
+	ctx = tflog.MaskFieldValuesWithFieldKeys(ctx, "aiwatchtower_username", "aiwatchtower_api_key")
 
 	tflog.Debug(ctx, "Creating AI WatchTower client")
 
@@ -188,12 +179,10 @@ func (p *aiWatchTowerProvider) Configure(ctx context.Context, req provider.Confi
 	tflog.Info(ctx, "Configured AI WatchTower client", map[string]any{"success": true})
 }
 
-// DataSources defines the data sources implemented in the provider.
 func (p *aiWatchTowerProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{}
 }
 
-// Resources defines the resources implemented in the provider.
 func (p *aiWatchTowerProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewModelResource,

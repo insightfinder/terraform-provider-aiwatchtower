@@ -48,7 +48,6 @@ func TestProviderSchema(t *testing.T) {
 		}
 	}
 
-	// Credentials must never be echoed into plan output or logs.
 	for _, name := range []string{"username", "api_key"} {
 		if !resp.Schema.Attributes[name].IsSensitive() {
 			t.Errorf("attribute %q must be marked sensitive", name)
@@ -92,8 +91,6 @@ func TestProviderResources(t *testing.T) {
 }
 
 func TestModelID(t *testing.T) {
-	// The import ID format has to survive a user name that is an email address, which carries an
-	// "@" of its own.
 	got := modelID("user@company.com", "Fraud-Guard", "V1.0.0")
 	want := "user@company.com@Fraud-Guard@V1.0.0"
 	if got != want {
@@ -158,8 +155,6 @@ func TestParseModelImportID(t *testing.T) {
 }
 
 func TestParseModelImportIDRoundTripsModelID(t *testing.T) {
-	// The import ID and the resource's own id attribute must be the same string, otherwise an
-	// imported resource and a created one end up with different ids for the same model.
 	user, model, ver := "user@company.com", "Fraud-Guard", "V1.0.0"
 	id := modelID(user, model, ver)
 
@@ -188,14 +183,11 @@ func TestMarkNewDataSources(t *testing.T) {
 			{Name: "OutputLog"},
 		},
 	}
-	// InputLog is already in state; OutputLog is being added by this apply.
 	markNewDataSources(config, map[string]bool{"InputLog": true})
 
 	if config.DataSources[0].IsNew {
 		t.Error("an existing data source was flagged as new; its project would be re-provisioned")
 	}
-	// ModelService.update gates the whole setup payload on hasNewDataSource(), so without this
-	// flag the added data source never gets a UIE project and the apply silently does nothing.
 	if !config.DataSources[1].IsNew {
 		t.Error("an added data source was not flagged as new; the backend would not provision it")
 	}

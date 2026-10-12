@@ -103,6 +103,13 @@ outside Terraform, where the next apply would be rejected as a conflict.
 project provisioning on a message queue; the UIE projects are created by a background consumer.
 A successful apply means the model record exists, not that its projects are ready.
 
+## Design notes
+
+The source carries no commentary. [DESIGN.md](DESIGN.md) records the backend contracts and the
+framework rules that shaped this provider — why `data_sources[].name` is a suffix, why `POST` is
+never retried, why a write does not copy the backend's answer back over the plan, and the rest.
+Read it before changing the client or the resource.
+
 ## Development
 
 ### Building

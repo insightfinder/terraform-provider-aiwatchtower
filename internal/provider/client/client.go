@@ -7,55 +7,38 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 const (
-	// DefaultTimeout bounds a single HTTP attempt. Model writes fan out to RabbitMQ and Cassandra
-	// on the backend, so they are slower than a plain CRUD service, but any single attempt that
-	// has not answered within this window is treated as lost rather than waited on indefinitely.
 	DefaultTimeout = 60 * time.Second
 
-	// DefaultMaxRetries is the number of *additional* attempts made after the first one, so a
-	// request is sent at most DefaultMaxRetries+1 times.
 	DefaultMaxRetries = 3
 
-	// retryBaseDelay is the first backoff interval; it doubles per retry (1s, 2s, 4s) and carries
-	// jitter so that several resources retrying in the same apply do not synchronise.
 	retryBaseDelay = time.Second
 
-	// maxResponseBytes caps how much of a response body is read into memory. The largest expected
-	// body is the model list, a few hundred kilobytes; anything beyond this is a malfunction or a
-	// captive-portal style HTML page, and reading it in full helps nobody.
-	maxResponseBytes = 16 << 20 // 16 MiB
+	maxResponseBytes = 16 << 20
 )
 
-// Client is the AI WatchTower API client.
 type Client struct {
 	BaseURL    string
 	Username   string
 	APIKey     string
 	HTTPClient *http.Client
 
-	// MaxRetries is the number of additional attempts after the first. Zero disables retrying.
-	MaxRetries int
-	// Timeout bounds each individual attempt.
-	Timeout time.Duration
-	// RetryBaseDelay is the first backoff interval, doubling per retry. Zero means the
-	// package default; tests set it low to keep the suite fast.
+	MaxRetries     int
+	Timeout        time.Duration
 	RetryBaseDelay time.Duration
 }
 
-// NewClient creates a new AI WatchTower API client.
 func NewClient(baseURL, username, apiKey string) (*Client, error) {
-	// Paths are joined by plain concatenation, so a configured base URL ending in "/" would
-	// produce "//api/external/v1/..." — tolerated by most servers but not all, and a needless
-	// way to make a working configuration fail.
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 
 	if baseURL == "" {
@@ -69,11 +52,9 @@ func NewClient(baseURL, username, apiKey string) (*Client, error) {
 	}
 
 	return &Client{
-		BaseURL:  baseURL,
-		Username: username,
-		APIKey:   apiKey,
-		// No Timeout on the http.Client itself: each attempt gets its own deadline through the
-		// request context, which also makes the attempt cancellable when Terraform is interrupted.
+		BaseURL:        baseURL,
+		Username:       username,
+		APIKey:         apiKey,
 		HTTPClient:     &http.Client{},
 		MaxRetries:     DefaultMaxRetries,
 		Timeout:        DefaultTimeout,
@@ -81,27 +62,12 @@ func NewClient(baseURL, username, apiKey string) (*Client, error) {
 	}, nil
 }
 
-// retryableStatus reports whether an HTTP status is worth another attempt.
-//
-// 408 and 429 are explicit "try again" signals and 5xx indicates a server-side fault, which for
-// this backend is usually a Cassandra or RabbitMQ hiccup that clears in seconds. Every other 4xx
-// is a deterministic rejection — a bad key, a missing parameter, a conflicting model — and
-// retrying it only multiplies the delay before the user sees the real error.
 func retryableStatus(statusCode int) bool {
 	return statusCode == http.StatusRequestTimeout ||
 		statusCode == http.StatusTooManyRequests ||
 		statusCode >= 500
 }
 
-// idempotent reports whether re-sending a method is safe.
-//
-// GET, PUT and DELETE can be repeated without changing the outcome: the model API's update and
-// delete both converge on the same end state. POST creates, and the backend answers a second
-// create with 409, so a POST that actually succeeded but whose response was lost would come back
-// as a spurious "model already exists". That is true of a dropped connection just as much as of
-// a 500 — neither tells us whether the server acted — so POST is not retried at all, and a
-// genuinely transient failure surfaces to the operator instead of being papered over with a
-// misleading conflict.
 func idempotent(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodPut, http.MethodDelete:
@@ -111,7 +77,6 @@ func idempotent(method string) bool {
 	}
 }
 
-// backoff returns the delay before attempt n (1-based retry count), with +/-20% jitter.
 func (c *Client) backoff(retry int) time.Duration {
 	base := c.RetryBaseDelay
 	if base <= 0 {
@@ -122,13 +87,6 @@ func (c *Client) backoff(retry int) time.Duration {
 	return d + jitter
 }
 
-// DoRequest performs an HTTP request against an /api/external/v1 endpoint, retrying transient
-// failures.
-//
-// AI WatchTower's ApiKeyFilter is registered on "/api/external/v1/*" and authenticates on the
-// X-Api-Key + X-User-Name header pair. Endpoints under /api/v1 are guarded by TokenFilter
-// instead, which requires a browser session token, so they are unreachable from this client no
-// matter what headers are supplied.
 func (c *Client) DoRequest(ctx context.Context, method, path string, body interface{}) ([]byte, int, error) {
 	var payload []byte
 	if body != nil {
@@ -158,8 +116,6 @@ func (c *Client) DoRequest(ctx context.Context, method, path string, body interf
 
 		if err != nil {
 			lastErr = err
-			// A transport failure may mean the request never arrived, or that the response was
-			// lost after the server acted on it. Retrying is safe for idempotent methods only.
 			if idempotent(method) && attempt < maxRetries && ctx.Err() == nil {
 				continue
 			}
@@ -174,11 +130,24 @@ func (c *Client) DoRequest(ctx context.Context, method, path string, body interf
 		return respBody, statusCode, nil
 	}
 
-	// Only reachable when the final attempt was itself a retryable failure.
 	return nil, 0, fmt.Errorf("request failed after %d attempts: %w", maxRetries+1, lastErr)
 }
 
-// doOnce performs a single attempt, bounded by the client's per-attempt timeout.
+func pathWithoutQuery(path string) string {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+func transportCause(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return ue.Err
+	}
+	return err
+}
+
 func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte) ([]byte, int, error) {
 	timeout := c.Timeout
 	if timeout <= 0 {
@@ -205,9 +174,7 @@ func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		// Never wrap the raw error alone: it embeds the full URL, and for this API the URL can
-		// carry the user name. The path is enough to locate the failure.
-		return nil, 0, fmt.Errorf("request to %s %s failed: %w", method, path, err)
+		return nil, 0, fmt.Errorf("request to %s %s failed: %w", method, pathWithoutQuery(path), transportCause(err))
 	}
 	defer resp.Body.Close()
 

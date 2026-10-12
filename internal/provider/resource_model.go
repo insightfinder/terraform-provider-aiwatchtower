@@ -23,7 +23,6 @@ import (
 	"github.com/insightfinder/terraform-provider-aiwatchtower/internal/provider/client"
 )
 
-// Ensure the implementation satisfies the expected interfaces.
 var (
 	_ resource.Resource                = &modelResource{}
 	_ resource.ResourceWithConfigure   = &modelResource{}
@@ -31,37 +30,29 @@ var (
 )
 
 const (
-	// readBackAttempts is how many times a write is followed by a read before the model is
-	// declared missing.
 	readBackAttempts = 3
-	// readBackDelay separates those attempts.
-	readBackDelay = 500 * time.Millisecond
+	readBackDelay    = 500 * time.Millisecond
 )
 
-// NewModelResource is a helper function to simplify the provider implementation.
 func NewModelResource() resource.Resource {
 	return &modelResource{}
 }
 
-// modelResource is the resource implementation.
 type modelResource struct {
 	client *client.Client
 }
 
-// modelDataSourceModel maps a single data source entry.
 type modelDataSourceModel struct {
 	Name       types.String `tfsdk:"name"`
 	DataType   types.String `tfsdk:"data_type"`
 	DataSource types.String `tfsdk:"data_source"`
 }
 
-// monitorInfoModel maps a single read-only monitor entry.
 type monitorInfoModel struct {
 	MonitorName types.String `tfsdk:"monitor_name"`
 	MonitorType types.String `tfsdk:"monitor_type"`
 }
 
-// modelResourceModel maps the resource schema data.
 type modelResourceModel struct {
 	ID           types.String `tfsdk:"id"`
 	UserName     types.String `tfsdk:"user_name"`
@@ -77,12 +68,10 @@ type modelResourceModel struct {
 	MonitorInfo  types.List   `tfsdk:"monitor_info"`
 }
 
-// Metadata returns the resource type name.
 func (r *modelResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_model"
 }
 
-// Schema defines the schema for the resource.
 func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Manages an AI WatchTower model. A model is identified by the (user_name, model_name, model_version) triple.",
@@ -169,7 +158,6 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 	}
 }
 
-// Configure adds the provider configured client to the resource.
 func (r *modelResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
@@ -187,7 +175,6 @@ func (r *modelResource) Configure(_ context.Context, req resource.ConfigureReque
 	r.client = c
 }
 
-// Create creates the resource and sets the initial Terraform state.
 func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -223,11 +210,7 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 
 	plan.ID = types.StringValue(modelID(userName, plan.ModelName.ValueString(), plan.ModelVersion.ValueString()))
 
-	// Read back so the Computed attributes come from the backend rather than being guessed.
 	if diags := r.refreshComputed(ctx, &plan, userName); diags.HasError() {
-		// The model was created; failing here without writing state would strand it, and the next
-		// apply would be rejected with a conflict. Persist what is known, zero the Computed
-		// attributes so the state is valid, and still report the failure.
 		setComputedUnknownAsEmpty(&plan)
 		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 		resp.Diagnostics.Append(diags...)
@@ -237,7 +220,6 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
-// Read refreshes the Terraform state with the latest data.
 func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state modelResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -270,7 +252,6 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// Update updates the resource and sets the updated Terraform state on success.
 func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan, state modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -291,16 +272,8 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
-	// The backend treats a non-empty oldModelVersion that differs from modelVersion as a version
-	// rename; passing the unchanged current version for an ordinary edit keeps it on the plain
-	// update path.
 	oldVersion := state.ModelVersion.ValueString()
 
-	// On the update path the backend provisions a data source only when it is flagged as new:
-	// ModelService.update gates the whole setup payload on hasNewDataSource(), and ModelSetupService
-	// then skips any entry whose isNew is false. Without this, adding a data source to an existing
-	// model would be recorded in the metadata and silently never given a UIE project. Entries that
-	// were already in state are left alone so their projects are not re-provisioned.
 	known, d := dataSourceNames(ctx, state.DataSources)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
@@ -326,8 +299,6 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	plan.ID = types.StringValue(modelID(userName, plan.ModelName.ValueString(), plan.ModelVersion.ValueString()))
 
 	if diags := r.refreshComputed(ctx, &plan, userName); diags.HasError() {
-		// The update already landed, including a possible version rename, so state must move with
-		// it even though the read-back failed — otherwise state still points at the old version.
 		setComputedUnknownAsEmpty(&plan)
 		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 		resp.Diagnostics.Append(diags...)
@@ -337,7 +308,6 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
-// Delete deletes the model.
 func (r *modelResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state modelResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -361,7 +331,6 @@ func (r *modelResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 }
 
-// ImportState imports the resource state.
 func (r *modelResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	userName, modelName, modelVersion, err := parseModelImportID(req.ID)
 	if err != nil {
@@ -375,11 +344,6 @@ func (r *modelResource) ImportState(ctx context.Context, req resource.ImportStat
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
 }
 
-// parseModelImportID splits "user_name@model_name@model_version".
-//
-// The split runs from the right because an AI WatchTower user name is routinely an email address
-// and therefore contains an "@" of its own: only the last two separators are structural. Splitting
-// on every "@" would reject every realistic import ID.
 func parseModelImportID(id string) (userName, modelName, modelVersion string, err error) {
 	const format = "import ID must be in the format user_name@model_name@model_version, " +
 		"for example user@company.com@Fraud-Guard@V1.0.0"
@@ -398,7 +362,6 @@ func parseModelImportID(id string) (userName, modelName, modelVersion string, er
 	return head[:nameSep], head[nameSep+1:], modelVersion, nil
 }
 
-// dataSourceNames collects the data source names recorded in state.
 func dataSourceNames(ctx context.Context, list types.List) (map[string]bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	names := map[string]bool{}
@@ -416,15 +379,12 @@ func dataSourceNames(ctx context.Context, list types.List) (map[string]bool, dia
 	return names, diags
 }
 
-// markNewDataSources flags every data source that is not already known to the backend, which is
-// what makes the update path provision its UIE project.
 func markNewDataSources(config *client.ModelConfig, known map[string]bool) {
 	for i := range config.DataSources {
 		config.DataSources[i].IsNew = !known[config.DataSources[i].Name]
 	}
 }
 
-// anyNewDataSource reports whether this write asks the backend to provision a project.
 func anyNewDataSource(config *client.ModelConfig) bool {
 	for _, ds := range config.DataSources {
 		if ds.IsNew {
@@ -434,7 +394,6 @@ func anyNewDataSource(config *client.ModelConfig) bool {
 	return false
 }
 
-// asyncProvisioningWarning tells the operator that the apply finished before the backend did.
 func asyncProvisioningWarning() diag.Diagnostic {
 	return diag.NewWarningDiagnostic(
 		"Data Source Projects Are Provisioned Asynchronously",
@@ -444,12 +403,10 @@ func asyncProvisioningWarning() diag.Diagnostic {
 	)
 }
 
-// modelID builds the resource's synthetic identifier.
 func modelID(userName, modelName, modelVersion string) string {
 	return fmt.Sprintf("%s@%s@%s", userName, modelName, modelVersion)
 }
 
-// buildModelConfig converts a plan into a client.ModelConfig.
 func (r *modelResource) buildModelConfig(ctx context.Context, plan modelResourceModel, userName string) (*client.ModelConfig, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
@@ -485,21 +442,9 @@ func (r *modelResource) buildModelConfig(ctx context.Context, plan modelResource
 	return config, diags
 }
 
-// refreshComputed re-reads the model after a write and fills in only the Computed attributes.
-//
-// It deliberately does NOT copy the backend's view of the Optional attributes back over the plan.
-// Terraform requires every non-Computed attribute to come out of Apply exactly as it went into the
-// plan, so echoing a value the backend has normalised — a defaulted data_source, a trimmed
-// description — fails the whole apply with "Provider produced inconsistent result after apply".
-// Reconciling user-set attributes with reality is Read's job, where a difference is drift to be
-// reported rather than a contract violation.
 func (r *modelResource) refreshComputed(ctx context.Context, m *modelResourceModel, userName string) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	// The write is synchronous as far as the model record goes, but the read can still miss it if
-	// it lands on a Cassandra replica that has not caught up. A handful of quick retries covers
-	// that without turning a genuinely missing model into a long stall. The HTTP-level retry in
-	// the client does not help here: this is a well-formed 200 carrying an empty list.
 	var config *client.ModelConfig
 	var err error
 	for attempt := 0; attempt < readBackAttempts; attempt++ {
@@ -536,7 +481,6 @@ func (r *modelResource) refreshComputed(ctx context.Context, m *modelResourceMod
 	return diags
 }
 
-// setComputed writes the backend-owned attributes onto the model.
 func setComputed(ctx context.Context, m *modelResourceModel, config *client.ModelConfig) diag.Diagnostics {
 	var diags diag.Diagnostics
 
@@ -560,21 +504,12 @@ func setComputed(ctx context.Context, m *modelResourceModel, config *client.Mode
 	return diags
 }
 
-// setComputedUnknownAsEmpty fills the Computed attributes with empty values.
-//
-// Used only to persist a usable state after a write succeeded but the read-back did not: the
-// model exists in AI WatchTower, so leaving it out of state entirely would strand it — the next
-// apply would try to create it again and be rejected with a conflict. Computed attributes cannot
-// stay unknown once apply finishes, so they are zeroed here and corrected by the next refresh.
 func setComputedUnknownAsEmpty(m *modelResourceModel) {
 	m.ModelID = types.StringValue("")
 	m.AnomalyCount = types.Int64Value(0)
 	m.MonitorInfo = types.ListValueMust(monitorInfoObjectType(), []attr.Value{})
 }
 
-// applyConfigToModel copies the backend's full view onto the Terraform model. Used by Read, where
-// the point is to surface drift: an attribute the backend no longer has becomes null, so that a
-// value cleared outside Terraform shows up in the next plan instead of being masked by state.
 func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResourceModel, config *client.ModelConfig) diag.Diagnostics {
 	var diags diag.Diagnostics
 
@@ -613,9 +548,6 @@ func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResource
 	return diags
 }
 
-// stringOrNull maps the backend's empty string to a null attribute. The API has no way to
-// distinguish "unset" from "set to the empty string", so an omitted attribute and an explicitly
-// empty one both read back as null.
 func stringOrNull(v string) types.String {
 	if v == "" {
 		return types.StringNull()
@@ -623,7 +555,6 @@ func stringOrNull(v string) types.String {
 	return types.StringValue(v)
 }
 
-// modelDataSourceObjectType mirrors the data_sources nested schema.
 func modelDataSourceObjectType() types.ObjectType {
 	return types.ObjectType{AttrTypes: map[string]attr.Type{
 		"name":        types.StringType,
@@ -632,7 +563,6 @@ func modelDataSourceObjectType() types.ObjectType {
 	}}
 }
 
-// monitorInfoObjectType mirrors the monitor_info nested schema.
 func monitorInfoObjectType() types.ObjectType {
 	return types.ObjectType{AttrTypes: map[string]attr.Type{
 		"monitor_name": types.StringType,

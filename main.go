@@ -12,15 +12,11 @@ import (
 	"github.com/insightfinder/terraform-provider-aiwatchtower/internal/provider"
 )
 
-// Run "go generate" to format example terraform files and generate the docs for the registry/website
-
 //go:generate terraform fmt -recursive ./examples/
 
 //go:generate go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs
 
 var (
-	// version is set by the goreleaser configuration to the appropriate value
-	// for the compiled binary.
 	version string = "dev"
 )
 

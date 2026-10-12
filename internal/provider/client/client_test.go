@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-// newTestClient points a client at srv with retry delays short enough for a unit test.
 func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
 	c, err := NewClient(srv.URL, "test-user", "test-key")
@@ -56,8 +55,6 @@ func TestDoRequestSendsAuthHeaders(t *testing.T) {
 	if gotUser != "test-user" {
 		t.Errorf("X-User-Name = %q, want %q", gotUser, "test-user")
 	}
-	// The backend's ApiKeyFilter reads this exact header; a rename breaks every call with a
-	// confusing 401, so pin it.
 	if gotKey != "test-key" {
 		t.Errorf("X-Api-Key = %q, want %q", gotKey, "test-key")
 	}
@@ -102,8 +99,6 @@ func TestDoRequestStopsAfterMaxRetries(t *testing.T) {
 	c := newTestClient(t, srv)
 	_, status, err := c.DoRequest(context.Background(), http.MethodGet, "/api/external/v1/model", nil)
 
-	// The last attempt's response is returned rather than swallowed, so callers still see the
-	// backend's own status and body.
 	if err != nil {
 		t.Fatalf("DoRequest returned an error instead of the final response: %v", err)
 	}
@@ -129,7 +124,6 @@ func TestDoRequestDoesNotRetryPostOnServerError(t *testing.T) {
 		t.Fatalf("DoRequest: %v", err)
 	}
 
-	// Re-sending a create whose response was lost would come back as a spurious 409.
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("POST was sent %d times, want 1", got)
 	}
@@ -190,7 +184,6 @@ func TestDoRequestHonoursCancelledContext(t *testing.T) {
 	if _, _, err := c.DoRequest(ctx, http.MethodGet, "/api/external/v1/model", nil); err == nil {
 		t.Fatal("expected an error once the context expired")
 	}
-	// One attempt, then the backoff wait is interrupted instead of running to completion.
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("server was called %d times after the context expired, want 1", got)
 	}
@@ -218,7 +211,6 @@ func TestDoRequestPerAttemptTimeout(t *testing.T) {
 }
 
 func TestDoRequestRetriesTransportFailure(t *testing.T) {
-	// A server that is closed before use gives a connection error on every attempt.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := srv.URL
 	srv.Close()
@@ -233,8 +225,6 @@ func TestDoRequestRetriesTransportFailure(t *testing.T) {
 	if _, _, err := c.DoRequest(context.Background(), http.MethodGet, "/x", nil); err == nil {
 		t.Fatal("expected a transport error")
 	}
-	// Three retries at 1ms/2ms/4ms are quick, but the call must not return instantly either —
-	// that would mean no retry happened at all.
 	if elapsed := time.Since(start); elapsed < 3*time.Millisecond {
 		t.Errorf("returned after %s; the transport failure does not appear to have been retried", elapsed)
 	}
@@ -242,23 +232,29 @@ func TestDoRequestRetriesTransportFailure(t *testing.T) {
 
 func TestDoRequestDoesNotLeakCredentialsInErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := srv.URL
+	addr := srv.URL
 	srv.Close()
 
-	c, err := NewClient(url, "secret-user", "secret-key")
+	c, err := NewClient(addr, "secret-user", "secret-key")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.RetryBaseDelay = time.Millisecond
 
-	_, _, err = c.DoRequest(context.Background(), http.MethodGet, "/api/external/v1/model?userName=secret-user", nil)
+	_, err = c.GetModel(context.Background(), "secret-user", "a-model", "V1")
 	if err == nil {
-		t.Fatal("expected an error")
+		t.Fatal("expected a transport error")
 	}
-	// Credentials travel in headers, but the path can carry the user name; errors are surfaced to
-	// the operator and land in Terraform logs, so they must not quote it back.
-	if msg := err.Error(); strings.Contains(msg, "secret-key") {
-		t.Errorf("error message leaks the API key: %s", msg)
+
+	msg := err.Error()
+	if strings.Contains(msg, "secret-user") {
+		t.Errorf("error leaks the user name %d time(s): %s", strings.Count(msg, "secret-user"), msg)
+	}
+	if strings.Contains(msg, "secret-key") {
+		t.Errorf("error leaks the API key: %s", msg)
+	}
+	if !strings.Contains(msg, "GET") || !strings.Contains(msg, "/api/external/v1/model") {
+		t.Errorf("error no longer identifies the failing request: %s", msg)
 	}
 }
 
@@ -272,13 +268,11 @@ func TestNewClientNormalisesBaseURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewClient(%q): %v", in, err)
 		}
-		// Paths are concatenated directly, so a stray slash would produce "//api/...".
 		if c.BaseURL != "https://ai.insightfinder.com" {
 			t.Errorf("NewClient(%q).BaseURL = %q", in, c.BaseURL)
 		}
 	}
 
-	// A URL that is nothing but slashes is still an empty base URL.
 	if _, err := NewClient("///", "u", "k"); err == nil {
 		t.Error("expected an error for a base URL consisting only of slashes")
 	}

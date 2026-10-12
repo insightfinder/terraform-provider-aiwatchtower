@@ -26,8 +26,6 @@ const modelListJSON = `[
 
 func TestGetModelSelectsTheMatchingEntry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The backend treats modelName/modelVersion as optional filters and may answer with more
-		// than the requested model, so the client must narrow the list itself.
 		_, _ = io.WriteString(w, modelListJSON)
 	}))
 	defer srv.Close()
@@ -47,7 +45,6 @@ func TestGetModelSelectsTheMatchingEntry(t *testing.T) {
 	if got.AnomalyCount != 7 {
 		t.Errorf("AnomalyCount = %d, want 7", got.AnomalyCount)
 	}
-	// environment and description live inside modelMetadata when the top level omits them.
 	if got.Environment != "Production" {
 		t.Errorf("Environment = %q, want %q", got.Environment, "Production")
 	}
@@ -76,7 +73,6 @@ func TestGetModelReturnsNilWhenAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetModel: %v", err)
 	}
-	// A missing model is not an error: Read turns it into "resource gone from state".
 	if got != nil {
 		t.Errorf("GetModel = %+v, want nil for a version that does not exist", got)
 	}
@@ -115,12 +111,9 @@ func TestCreateModelMarksDataSourcesNew(t *testing.T) {
 	if body.ModelMetadata == nil || len(body.ModelMetadata.DataSources) != 1 {
 		t.Fatalf("request carried no data sources: %+v", body.ModelMetadata)
 	}
-	// hasNewDataSource() gates project provisioning entirely; without isNew the backend accepts
-	// the model and silently creates nothing.
 	if !body.ModelMetadata.DataSources[0].IsNew {
 		t.Error("data source was sent with isNew=false; the backend would not provision its project")
 	}
-	// The create endpoint rejects any payload carrying oldModelVersion.
 	if body.OldModelVersion != "" {
 		t.Errorf("create sent oldModelVersion=%q, which the backend rejects", body.OldModelVersion)
 	}
@@ -159,7 +152,6 @@ func TestUpdateModelSendsOldVersion(t *testing.T) {
 		t.Fatalf("UpdateModel: %v", err)
 	}
 
-	// isUpdateModelVersion() is what turns a version change into a rename instead of a rejection.
 	if body.OldModelVersion != "V1" {
 		t.Errorf("oldModelVersion = %q, want %q", body.OldModelVersion, "V1")
 	}
@@ -184,8 +176,6 @@ func TestDeleteModelSkipsTheCallWhenAlreadyGone(t *testing.T) {
 	if err := c.DeleteModel(context.Background(), "u", "m", "v"); err != nil {
 		t.Fatalf("DeleteModel on an absent model must succeed, got: %v", err)
 	}
-	// Deleting an absent key fails the backend call outright, and the retry layer would spend
-	// several seconds on it, so the existence check has to come first.
 	if got := atomic.LoadInt32(&deletes); got != 0 {
 		t.Errorf("DELETE was sent %d times for a model that does not exist, want 0", got)
 	}
@@ -211,8 +201,6 @@ func TestDeleteModelSendsVersionKey(t *testing.T) {
 	if len(payload) != 1 {
 		t.Fatalf("payload = %+v, want a single key", payload)
 	}
-	// ModelKey's field is "version"; sending "modelVersion" deserializes to null and the delete
-	// matches nothing while still looking like a well-formed request.
 	if payload[0]["version"] != "V1.0.0" {
 		t.Errorf("key = %+v, want version=V1.0.0", payload[0])
 	}
@@ -228,7 +216,6 @@ func TestDeleteModelSucceedsIfModelVanishesDuringDelete(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		// Present on the first look, gone afterwards.
 		if atomic.AddInt32(&gets, 1) == 1 {
 			_, _ = io.WriteString(w, modelListJSON)
 			return
