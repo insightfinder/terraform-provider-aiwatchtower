@@ -4,7 +4,7 @@ Why this provider is built the way it is. The code itself carries no commentary,
 that reads as arbitrary is usually a backend contract that cost something to discover.
 
 Everything below was verified against the AI WatchTower backend on the branch deployed to the test
-environment, or observed live against `ai-test.insightfinder.com`. Java class and method names refer
+environment, or observed live against an AI WatchTower test deployment. Java class and method names refer
 to the `AI-WatchTower-Backend` repository.
 
 ---
@@ -87,6 +87,13 @@ The provider sets it itself — and the two paths need different values:
 **This is why adding a data source to an existing model used to do nothing.** The entry was recorded
 in the model metadata, no project was created, and the apply reported success. Entries already in
 state must keep `isNew=false` so their projects are not re-provisioned.
+
+`data_sources` and `monitor_info` are **sets, not lists**. `ModelDetail` keeps both in a Java
+`Set`, so the backend returns them in hash order rather than the order they were sent. Modelling
+them as ordered lists made Terraform report the reshuffle as a diff, which apply could never
+settle: every apply rewrote the order and the backend shuffled it back. Unit tests cannot catch
+this — a stub server replays whatever order it was given — so it only showed up against the real
+API.
 
 ### 2.4 Provisioning is asynchronous
 
@@ -261,3 +268,43 @@ supplies the prose sections around the generated schema.
 The `version` variable in `main.go` is stamped at build time by goreleaser; the `"dev"` literal is
 only the local fallback. It is surfaced through `MetadataResponse.Version`, and the framework
 convention is `"dev"` locally and `"test"` under acceptance tests.
+
+---
+
+## 6. Releasing
+
+A `v*` tag runs `.github/workflows/release.yml`, which imports the signing key and hands the build
+to GoReleaser. The Terraform Registry then ingests that GitHub Release, so the asset names are a
+contract, not a preference:
+
+- `<project>_<version>_<os>_<arch>.zip`, each holding a binary named `<project>_v<version>`
+- `<project>_<version>_SHA256SUMS` and its detached signature `..._SHA256SUMS.sig`
+- `<project>_<version>_manifest.json`
+
+The manifest needs **two** separate `extra_files` blocks in `.goreleaser.yml` — one under
+`checksum:` and one under `release:` — with byte-identical `name_template`s. They are independent
+keys: the checksum pipe runs before the publish pipe, so an entry under `release:` alone uploads a
+manifest that `SHA256SUMS` does not list, and an entry under `checksum:` alone lists a file that was
+never uploaded. HashiCorp's own scaffolding writes both.
+
+Without the manifest the Registry falls back to declaring **protocol 5.0**. This provider serves
+**6.0** — `main.go` leaves `ServeOpts.ProtocolVersion` unset and terraform-plugin-framework defaults
+to `tf6server` — so the omission does not fail the release, it silently advertises the provider to
+Terraform versions that cannot run it.
+
+`terraform-registry-manifest.json` must be committed. The release runner checks out only tracked
+files, and GoReleaser aborts on a glob that matches nothing.
+
+The actions in `release.yml` are pinned to commit SHAs rather than tags, because that workflow is
+handed the GPG private key and a mutable tag can be repointed. The pinned revisions are:
+
+| Action | Pinned SHA | Equivalent tag |
+|---|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | v4 |
+| `actions/setup-go` | `40f1582b2485089dde7abd97c1529aa768e1baff` | v5 |
+| `crazy-max/ghaction-import-gpg` | `e89d40939c28e39f97cf32126055eeae86ba74ec` | v6 |
+| `goreleaser/goreleaser-action` | `e435ccd777264be153ace6237001ef4d979d3a7a` | v6 |
+
+`VERSION` is read by nothing: the published version comes from the git tag, and `main.version` is
+stamped by GoReleaser's ldflags. It exists to record the intended next version, and the `Makefile`
+install path and the README's local-install instructions are kept in step with it by hand.

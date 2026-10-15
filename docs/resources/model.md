@@ -71,7 +71,7 @@ output "attached_monitors" {
 
 ### Optional
 
-- `data_sources` (Attributes List) Data sources to provision for this model. Each entry causes AI WatchTower to create a UIE project asynchronously after apply returns. (see [below for nested schema](#nestedatt--data_sources))
+- `data_sources` (Attributes Set) Data sources to provision for this model. Each entry causes AI WatchTower to create a UIE project asynchronously after apply returns. Unordered: the backend stores these as a set and returns them in an arbitrary order. (see [below for nested schema](#nestedatt--data_sources))
 - `description` (String) Free-form description of the model.
 - `environment` (String) Environment label for the model, for example 'Production'.
 - `ubl_dimension` (Number) Dimension of the model's UBL (unsupervised baseline learning) setting.
@@ -82,7 +82,7 @@ output "attached_monitors" {
 - `anomaly_count` (Number) Number of anomalies currently recorded against the model.
 - `id` (String) Identifier for the model (user_name@model_name@model_version).
 - `model_id` (String) Backend-generated model identifier.
-- `monitor_info` (Attributes List) Monitors attached to this model. Read-only — monitors are managed outside this resource. (see [below for nested schema](#nestedatt--monitor_info))
+- `monitor_info` (Attributes Set) Monitors attached to this model. Read-only — monitors are managed outside this resource. Unordered, like the set the backend stores. (see [below for nested schema](#nestedatt--monitor_info))
 
 <a id="nestedatt--data_sources"></a>
 ### Nested Schema for `data_sources`

@@ -42,12 +42,9 @@ export AW_API_KEY="your-api-key"
 The provider authenticates with the `X-User-Name` and `X-Api-Key` headers against AI WatchTower's
 `/api/external/v1` endpoints.
 
-`api_key` is an AI WatchTower API key, which is not the same thing as a UIE license key — but in
-practice the two often coincide: `ApiKeyService.createUserApiKey` registers the account's license
-key alongside every generated key, so for an account that has ever had an API key created, the
-license key shown on the UIE Account Info page is accepted here as well. If it is rejected, create
-a dedicated key by calling `POST /api/v1/user/api-key?userName=<user>&apiKeyName=<name>` from a
-logged-in AI WatchTower browser session.
+`api_key` is an AI WatchTower API key. Create one from the AI WatchTower UI and keep it out of
+version control — pass it through `AW_API_KEY` or a secret manager rather than writing it into a
+`.tf` file.
 
 ## Example: Model
 
@@ -124,9 +121,9 @@ go build -o terraform-provider-aiwatchtower
 make install
 ```
 
-This publishes the binary as version `1.0.0` under
-`~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/1.0.0/`, which a local
-configuration can consume with `version = "~> 1.0"`.
+This publishes the binary as version `0.1.0` under
+`~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/0.1.0/`, which a local
+configuration can consume with `version = "~> 0.1"`.
 
 ### Testing
 

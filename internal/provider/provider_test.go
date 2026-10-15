@@ -9,6 +9,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 
 	"github.com/insightfinder/terraform-provider-aiwatchtower/internal/provider/client"
 )
@@ -200,6 +201,29 @@ func TestMarkNewDataSourcesWithNoPriorState(t *testing.T) {
 	for i, ds := range config.DataSources {
 		if !ds.IsNew {
 			t.Errorf("data source %d was not flagged as new although state knows of none", i)
+		}
+	}
+}
+
+func TestModelDataSourcesAreUnordered(t *testing.T) {
+	r := NewModelResource()
+	resp := &resource.SchemaResponse{}
+	r.Schema(context.Background(), resource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
+	}
+
+	for _, name := range []string{"data_sources", "monitor_info"} {
+		attr, ok := resp.Schema.Attributes[name]
+		if !ok {
+			t.Errorf("schema is missing attribute %q", name)
+			continue
+		}
+		// The backend keeps both of these in a Java Set and hands them back in hash order, so a
+		// list attribute reports the reshuffle as a diff that apply can never settle.
+		if _, isSet := attr.(schema.SetNestedAttribute); !isSet {
+			t.Errorf("attribute %q is %T; it must be a SetNestedAttribute because the backend "+
+				"returns it unordered", name, attr)
 		}
 	}
 }

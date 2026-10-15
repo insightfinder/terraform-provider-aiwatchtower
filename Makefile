@@ -8,8 +8,8 @@ build:
 
 # Install the provider locally for testing
 install: build
-	mkdir -p ~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/1.0.0/linux_amd64
-	cp terraform-provider-aiwatchtower ~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/1.0.0/linux_amd64/
+	mkdir -p ~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/0.1.0/linux_amd64
+	cp terraform-provider-aiwatchtower ~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/0.1.0/linux_amd64/
 
 # Run unit tests
 test: test-unit

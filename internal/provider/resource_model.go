@@ -61,11 +61,11 @@ type modelResourceModel struct {
 	ModelType    types.String `tfsdk:"model_type"`
 	Environment  types.String `tfsdk:"environment"`
 	Description  types.String `tfsdk:"description"`
-	DataSources  types.List   `tfsdk:"data_sources"`
+	DataSources  types.Set    `tfsdk:"data_sources"`
 	UBLDimension types.Int64  `tfsdk:"ubl_dimension"`
 	ModelID      types.String `tfsdk:"model_id"`
 	AnomalyCount types.Int64  `tfsdk:"anomaly_count"`
-	MonitorInfo  types.List   `tfsdk:"monitor_info"`
+	MonitorInfo  types.Set    `tfsdk:"monitor_info"`
 }
 
 func (r *modelResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -112,8 +112,8 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Description: "Free-form description of the model.",
 				Optional:    true,
 			},
-			"data_sources": schema.ListNestedAttribute{
-				Description: "Data sources to provision for this model. Each entry causes AI WatchTower to create a UIE project asynchronously after apply returns.",
+			"data_sources": schema.SetNestedAttribute{
+				Description: "Data sources to provision for this model. Each entry causes AI WatchTower to create a UIE project asynchronously after apply returns. Unordered: the backend stores these as a set and returns them in an arbitrary order.",
 				Optional:    true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
@@ -144,8 +144,8 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Description: "Number of anomalies currently recorded against the model.",
 				Computed:    true,
 			},
-			"monitor_info": schema.ListNestedAttribute{
-				Description: "Monitors attached to this model. Read-only — monitors are managed outside this resource.",
+			"monitor_info": schema.SetNestedAttribute{
+				Description: "Monitors attached to this model. Read-only — monitors are managed outside this resource. Unordered, like the set the backend stores.",
 				Computed:    true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
@@ -362,7 +362,7 @@ func parseModelImportID(id string) (userName, modelName, modelVersion string, er
 	return head[:nameSep], head[nameSep+1:], modelVersion, nil
 }
 
-func dataSourceNames(ctx context.Context, list types.List) (map[string]bool, diag.Diagnostics) {
+func dataSourceNames(ctx context.Context, list types.Set) (map[string]bool, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	names := map[string]bool{}
 	if list.IsNull() || list.IsUnknown() {
@@ -494,12 +494,12 @@ func setComputed(ctx context.Context, m *modelResourceModel, config *client.Mode
 			MonitorType: types.StringValue(mi.MonitorType),
 		})
 	}
-	monitorList, d := types.ListValueFrom(ctx, monitorInfoObjectType(), monitors)
+	monitorSet, d := types.SetValueFrom(ctx, monitorInfoObjectType(), monitors)
 	diags.Append(d...)
 	if diags.HasError() {
 		return diags
 	}
-	m.MonitorInfo = monitorList
+	m.MonitorInfo = monitorSet
 
 	return diags
 }
@@ -507,7 +507,7 @@ func setComputed(ctx context.Context, m *modelResourceModel, config *client.Mode
 func setComputedUnknownAsEmpty(m *modelResourceModel) {
 	m.ModelID = types.StringValue("")
 	m.AnomalyCount = types.Int64Value(0)
-	m.MonitorInfo = types.ListValueMust(monitorInfoObjectType(), []attr.Value{})
+	m.MonitorInfo = types.SetValueMust(monitorInfoObjectType(), []attr.Value{})
 }
 
 func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResourceModel, config *client.ModelConfig) diag.Diagnostics {
@@ -534,14 +534,14 @@ func (r *modelResource) applyConfigToModel(ctx context.Context, m *modelResource
 				DataSource: stringOrNull(ds.DataSource),
 			})
 		}
-		list, d := types.ListValueFrom(ctx, modelDataSourceObjectType(), elems)
+		set, d := types.SetValueFrom(ctx, modelDataSourceObjectType(), elems)
 		diags.Append(d...)
 		if diags.HasError() {
 			return diags
 		}
-		m.DataSources = list
+		m.DataSources = set
 	} else {
-		m.DataSources = types.ListNull(modelDataSourceObjectType())
+		m.DataSources = types.SetNull(modelDataSourceObjectType())
 	}
 
 	diags.Append(setComputed(ctx, m, config)...)
