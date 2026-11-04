@@ -308,3 +308,175 @@ handed the GPG private key and a mutable tag can be repointed. The pinned revisi
 `VERSION` is read by nothing: the published version comes from the git tag, and `main.version` is
 stamped by GoReleaser's ldflags. It exists to record the intended next version, and the `Makefile`
 install path and the README's local-install instructions are kept in step with it by hand.
+
+---
+
+## 7. The monitor resource
+
+### 7.1 What a monitor is, and what the API will let you change
+
+A monitor is keyed by `MonitorKey(userName, monitorName)` and watches one model's data sources for
+one `MonitorType`. `MonitorExternalController` is unusual among the external controllers in
+offering a complete CRUD set, so no backend change was needed to manage one.
+
+`MonitorUpdateDTO` carries exactly three mutable fields — `monitorDesc`, `monitorScope` and
+`monitorSetting` — and `MonitorService.updateMonitor` applies each only when it arrives non-null.
+Nothing else about a monitor can be changed after creation, which is why `monitor_name`,
+`monitor_type`, `model_name`, `model_version`, `environment`, `data_sources` and `user_name` all
+carry `RequiresReplace`.
+
+That same "only non-null fields are applied" rule means an emptied description or scope has to be
+sent explicitly. `monitorUpdateDTO` therefore drops `omitempty` from both, and `toUpdateDTO`
+substitutes an empty slice for a nil scope. `TestUpdateMonitorSendsClearedFieldsExplicitly` pins
+it; with `omitempty` restored the test fails and the backend silently keeps the old value.
+
+`isValidMonitorCreationRequest` refuses a duplicate monitor name with 409 and a second monitor of a
+type the model already carries with 424. Both are surfaced with the backend's own message rather
+than a generic HTTP error.
+
+### 7.2 Writing and reading a monitor are different shapes
+
+The write shape is `MonitorDTO`, the read shape is `MonitorUIDTO`. They disagree on the version
+field: the request sends `modelVersion`, the response returns `version`, alongside
+`monitorNameDisplayName`, `modelNameDisplayName` and `versionDisplayName`.
+
+Those display names are not safe to read. `MonitorApiHandler.applyVersionDisplayMap` rewrites them
+through `ModelUtil.replaceUsingMap` against the trained-model display map, so they are a rendering
+of the name rather than the name. The resource reads the raw `monitorName`, `modelName` and
+`version` fields only.
+
+A successful update answers **201**, not 200: `MonitorService.updateMonitor` returns its
+`ApiResponse` with `HttpStatus.CREATED`, the same status the create path uses. A client that
+accepts only 200 reports every successful update as a failure, and a stub test server cannot catch
+it because the stub decides the status itself. Both writes accept 200 and 201; delete answers 200,
+because it is built from `ResponseEntity.ok` in the controller rather than from an `ApiResponse`.
+
+### 7.3 A missing monitor and a forbidden one are the same answer
+
+`MonitorService.getSingleByUserInSameTenantPermissionFilter` returns null both when the monitor
+does not exist and when the caller may not see it, and the handler turns either into
+403 `No permission to access the monitor`. There is no 404.
+
+Treating that 403 as an error breaks the ordinary drift case — someone deletes a monitor in the UI
+and every subsequent plan fails. Treating it as "gone" silently drops a managed resource out of
+state the first time a permission is misconfigured.
+
+`GetMonitor` disambiguates by listing the user's monitors: the list endpoint is the same
+controller and the same permission, so a list that returns 200 proves the caller may read monitors,
+which makes the 403 on the single monitor mean it is gone. A list that is also refused reports the
+error. `TestGetMonitorTreatsForbiddenAsAbsentWhenTheListIsReadable` and
+`TestGetMonitorReportsForbiddenWhenTheListIsAlsoForbidden` pin both halves.
+
+The same 403 reaches `DeleteMonitor`, which is why it reads the monitor first rather than
+inspecting the delete's own status: `MonitorApiHandler.delete` calls `deleteByKeys` and reports
+success without checking that anything was removed.
+
+### 7.4 The backend drops data sources without saying so
+
+`MonitorService.saveMonitor` filters the request's data sources through `isDataSourceCompatible`
+and keeps only `qualifyingDataSources`. A `Metric` data source is rejected by every type except
+`MODEL_PERFORMANCE`, and `LLM_TRUST_AND_SAFETY` keeps nothing but `Trace`, because the setting is
+derived from the data source's own log or trace records. The monitor is then stored with whatever
+survived, and the call returns success.
+
+Terraform cannot express that. `data_sources` is not computed, so a write has to return what the
+plan asked for; writing back the filtered list is an inconsistent result, and writing back the
+planned list leaves state claiming a data source that was never stored.
+
+So the resource compares the write against the read-back with `client.DroppedDataSources` and fails
+the apply, naming what was dropped. State is written from the backend's own answer first, so the
+resource is recorded, marked tainted and replaced on the next apply rather than being orphaned.
+
+The rule is deliberately not reimplemented client-side as a plan-time validator: a copy of backend
+logic goes stale silently, and comparing against the read-back cannot.
+
+### 7.5 `environment` is resolved, not stored
+
+`MonitorService.resolveEnvironment` falls back to the model's own `ModelDetail.environment` when
+the monitor carries none. A monitor created without an environment therefore reads back with the
+model's, which is why the attribute is `Optional` **and** `Computed`.
+
+`monitorScope` has the mirror-image problem: `Monitor.getScope()` returns `new ArrayList<>()`, not
+null, when nothing is stored. The read path maps an empty list back to null so an absent scope
+stays absent.
+
+### 7.6 `monitorSetting` is polymorphic, and only one shape is modelled
+
+`MonitorSetting` has nine implementations, selected by a `type` discriminator. Modelling all nine
+as typed attributes is a large schema for little gain, and modelling none of them gives up
+validation and documentation entirely.
+
+The resource does both: `data_quality` is the full typed form of `DataQualitySetting`, and
+`monitor_setting_json` carries any of the other eight verbatim. `ValidateConfig` keeps them
+mutually exclusive, requires `data_quality` for a `DATA_QUALITY` monitor and forbids it for every
+other type.
+
+A `DATA_QUALITY` monitor is held to the typed form because of 7.7: the defaults the backend writes
+into the setting cannot be reconciled against a raw JSON document, so the JSON form would diff
+forever. Some other types normalize their setting on write — `LLMTrustAndSafetySetting.validateAndNormalize`
+does — and those are documented as needing `ignore_changes`.
+
+The setting is serialized by the backend's **Gson**, not Jackson: `Monitor.setSetting` gzips
+`GsonUtility.gson.toJson(...)` into a `ByteBuffer`. Gson names JSON after the Java field, so the
+Go field tags follow the field names, not the accessors. `isPrimaryKey` is the one that bites:
+the Java field is a boxed `Boolean` precisely so the accessor is `getIsPrimaryKey()`, and a client
+sending `primaryKey` is silently ignored. `TestDataQualitySettingUsesTheBackendFieldNames` pins it.
+
+`GsonUtility.gson` does not serialize nulls, so an unset field is absent from storage and absent
+again on read. Every optional field in the Go shape is therefore a pointer with `omitempty`, so
+"unset" survives the round trip instead of becoming a zero value.
+
+### 7.7 The backend rewrites a data quality setting before storing it
+
+Both `saveMonitor` and `updateMonitor` call `applyVolumeDefaults()` and
+`applySchemaCheckDefaults()` on a `DataQualitySetting` before it is persisted, unconditionally —
+not only when volume detection or schema checking is enabled. They set `volumeDetectionMode` to
+`AI`, `volumeSensitivity` to `MEDIUM_HIGH`, the baseline factors to 1.08 and 1.15, and each unset
+`schemaCheck` sub-check to false.
+
+Those six attributes are `Optional` and `Computed`, and `fillComputedDataQuality` writes **only the
+values the plan left unknown**. Anything the plan already settled is sent to the backend and must
+come back unchanged; overwriting it from the read-back is the inconsistent-result bug of 3.1, one
+level deeper. `TestFillComputedDataQualityOnlyWritesUnknowns` pins the distinction, and
+`TestDataQualityToClientOmitsUnknownComputedAttributes` pins the other half: an unknown attribute
+is left out of the request so the backend is the one that decides it.
+
+`volumeThresholdsEnabled` is deliberately **not** exposed. The backend keeps it as a legacy mirror
+of `volumeDetectionMode == MANUAL` and rewrites it on every save. A computed-only attribute keeps
+its prior state in a plan, so it would read stale the moment the mode changed, and forcing it
+unknown would need a plan modifier reaching across attributes. It carries no information that
+`volume_detection_mode` does not.
+
+`volumeThresholds` is *not* defaulted on write — `getVolumeThresholdsOrDefault()` applies 20/40 at
+read time elsewhere — so it round-trips verbatim and stays a plain `Optional`.
+
+### 7.8 Shapes inside the data quality setting
+
+`dataQualityTypes` is a Java `Set`, so it is a Terraform set, for the same reason `data_sources`
+is: a list would never converge against the order the backend returns. `consistencyKeys` is a
+`List` and stays ordered.
+
+`groupKeys` is a `Map<String, Map<String, FieldSetting>>`. Terraform has no map-of-map-of-object
+nested attribute, and expressing it as a raw `MapAttribute` of object element types would make
+every field mandatory and drop the per-attribute documentation. It is modelled as a map of objects
+each holding a `fields` map instead, which costs one extra level in HCL and keeps the whole shape
+typed.
+
+`VolumeReferenceDTO` is reachable from Terraform even though the Workbench uploads it as a file:
+it is two flat lists once parsed. `VolumeReferenceService.pushReference` calls its `normalize()`,
+which upper-cases `dayOfWeek`, before the reference reaches UIE, so a lower-case weekday is
+accepted. The schema still documents the exact spellings the backend validates against.
+
+Volume detection itself was verified live: `volume_detection_enabled`, `MANUAL` mode and
+`volume_thresholds` apply on a first create and re-plan clean. `volume_reference` is the one part
+that could not be exercised. Every push of a reference, down to one holiday and one default volume
+entry, on a model created minutes earlier, comes back as a generic "Monitor update failed". The
+payload clears the backend's own `VolumeReferenceDTO.validate()` first, so the failure is inside
+AW's call to UIE's `/api/v1/volumereference`, not in what this provider sends. The attribute is
+kept, because the shape is pinned by both sides' DTOs, but it is untested against a live backend.
+
+### 7.9 Import
+
+A monitor imports as `user_name@monitor_name`, split on the **last** separator so an email address
+user name survives. This is the same rule, and the same trap, as the model resource's three-part
+identifier.

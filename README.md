@@ -16,7 +16,7 @@ terraform {
   required_providers {
     aiwatchtower = {
       source  = "insightfinder/aiwatchtower"
-      version = "~> 0.1"
+      version = "~> 1.0"
     }
   }
 }
@@ -72,6 +72,7 @@ See [the resource docs](docs/resources/model.md) for the full field list.
 ## Resources
 
 - [`aiwatchtower_model`](docs/resources/model.md) - Manage AI WatchTower models
+- [`aiwatchtower_monitor`](docs/resources/monitor.md) - Manage AI WatchTower monitors, including the full settings of a data quality monitor
 
 ## Reliability
 
@@ -121,9 +122,9 @@ go build -o terraform-provider-aiwatchtower
 make install
 ```
 
-This publishes the binary as version `0.1.0` under
-`~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/0.1.0/`, which a local
-configuration can consume with `version = "~> 0.1"`.
+This publishes the binary as version `1.0.0` under
+`~/.terraform.d/plugins/registry.terraform.io/insightfinder/aiwatchtower/1.0.0/`, which a local
+configuration can consume with `version = "~> 1.0"`.
 
 ### Testing
 

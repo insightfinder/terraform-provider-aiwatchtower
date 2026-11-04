@@ -19,7 +19,7 @@ terraform {
   required_providers {
     aiwatchtower = {
       source  = "insightfinder/aiwatchtower"
-      version = "~> 0.1"
+      version = "~> 1.0"
     }
   }
 }

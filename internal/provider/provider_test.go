@@ -60,7 +60,8 @@ func TestProviderResources(t *testing.T) {
 	p := New("test")()
 
 	expected := map[string]bool{
-		"aiwatchtower_model": false,
+		"aiwatchtower_model":   false,
+		"aiwatchtower_monitor": false,
 	}
 
 	resources := p.Resources(context.Background())
