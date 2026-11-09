@@ -1,0 +1,64 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+{{ tffile (printf "examples/resources/%s/resource.tf" .Name) }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the following syntax:
+
+{{ codefile "shell" (printf "examples/resources/%s/import.sh" .Name) }}
+
+## Notes
+
+- **Almost everything replaces the monitor.** The backend's update accepts only a description, a
+  scope and a setting. `monitor_name`, `monitor_type`, `model_name`, `model_version`,
+  `environment`, `data_sources` and `user_name` therefore force replacement; changing them in
+  place is not something the API can express.
+
+- **A model carries at most one monitor of each type.** Creating a second one of the same type
+  against the same model is refused with `Monitor type already existed`, and a monitor whose name
+  is already taken by the same user is refused as a conflict.
+
+- **Data sources the monitor type cannot read are dropped silently.** Every type except
+  `MODEL_PERFORMANCE` rejects a `Metric` data source, and `LLM_TRUST_AND_SAFETY` accepts nothing
+  but `Trace`, because the setting is derived from the data source's own records. The backend
+  stores the monitor with the remaining data sources and reports success. This provider compares
+  the write against the read-back and fails the apply instead, naming what was dropped, so state
+  never claims a data source that was not stored.
+
+- **`environment` reflects the model when it is left unset.** The backend falls back to the
+  model's own environment when the monitor does not carry one, so this attribute holds that
+  resolved value rather than staying null.
+
+- **The backend fills in volume and schema check defaults.** An omitted `volume_detection_mode`
+  becomes `AI`, `volume_sensitivity` becomes `MEDIUM_HIGH`, the baseline factors become 1.08 and
+  1.15, and every unset `schema_check` sub-check becomes `false` — whether or not volume detection
+  or schema checking is enabled. Those attributes are computed, so they settle to what the backend
+  decided rather than showing a permanent diff.
+
+- **`volume_reference.volumes[].day_of_week` is compared exactly.** The backend holds a
+  normalization routine for it but never calls it, so a lower-case weekday is stored as written
+  and then matches nothing. Write `SATURDAY`, not `Saturday`.
+
+- **`monitor_setting_json` is for the other monitor types only.** A `DATA_QUALITY` monitor must use
+  `data_quality`: the defaults the backend writes into a data quality setting cannot be reconciled
+  against a raw JSON document, so it would diff forever. Some other types normalize their setting
+  on write; if one of those shows a permanent diff, pin it with `lifecycle { ignore_changes }`.
+
+- **A monitor that is gone and one you may not see both answer 403.** The provider tells them apart
+  by listing the user's monitors: when the list is readable the 403 means the monitor is gone and
+  it is removed from state, and when the list is refused as well the error is reported. Deleting a
+  monitor that is already gone is not an error.

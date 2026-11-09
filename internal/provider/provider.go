@@ -186,5 +186,6 @@ func (p *aiWatchTowerProvider) DataSources(_ context.Context) []func() datasourc
 func (p *aiWatchTowerProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewModelResource,
+		NewMonitorResource,
 	}
 }
