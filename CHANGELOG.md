@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **aiwatchtower_monitor**: `data_quality.upload_json` takes the Workbench's Upload JSON file unchanged (a sample event plus `$dataCheckTypes`) and expands it into `keys` / `group_keys` exactly as the Workbench does, including `desc` descriptions, `when` / `fill` regex configuration, `type:` declarations and `primaryKey`. Every field of the sample event is sent in file order so the schema check knows the whole event; a field gets checks only from its `$dataCheckTypes` entry. Entries the Workbench would silently drop are reported as plan warnings.
+- `data_quality.group_extraction_regex` (the Workbench's Auto Grouping regex, `dataQualityGroupExtractionRegex`) and per-field `data_quality_descriptions` (`dataQualityDescriptions`).
+
+### Changed
+- `data_quality.keys` and `data_quality.group_keys` are now Optional+Computed, so they can be planned from `upload_json`. Without `upload_json` they behave as before.
+- A field setting is always sent with `dataQualityTypes`, as an empty list when it has no checks, matching the Workbench.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

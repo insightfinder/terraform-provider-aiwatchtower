@@ -15,6 +15,31 @@ description: |-
 
 {{ .SchemaMarkdown | trimspace }}
 
+## Configuring a data quality monitor from the Workbench's Upload JSON file
+
+`data_quality.upload_json` takes the same file the Workbench's **Upload JSON** dialog accepts — a
+sample log event with an optional top-level `"$dataCheckTypes"` object — and expands it exactly as
+the Workbench does, including `desc` descriptions, `when`/`fill` regex configuration, `type:`
+declarations and `primaryKey`. The plan lists the resulting `keys` (and `group_keys`), so review it
+the way you would review the Workbench's preview.
+
+- **Every field of the sample event is sent, in file order.** The schema check compares records
+  against the fields a monitor carries, so every field is enabled. A field gets checks only from
+  its `$dataCheckTypes` entry; a field without one, or with `[]`, is sent with no checks. (The
+  Workbench instead leaves rows unticked after an upload and gives a ticked row without an entry
+  its default checks.)
+- **Entries the Workbench would silently drop are plan warnings**, not errors: a check that does not
+  apply to the field type, an unknown keyword, a malformed `range` threshold or `custom` check, a
+  `$dataCheckTypes` key that matches no field. The plan sends what the Workbench would send.
+- **Grouping needs both `group_name_key` and `group_extraction_regex`**, as the Workbench needs both
+  "Group by" and Auto Grouping. The regex runs with Go's RE2 syntax, so lookbehind and
+  backreferences are not available; a pattern RE2 cannot compile fails validation.
+- **The file is the source of truth.** A rule changed in the Workbench shows up as a diff on the next
+  plan, and applying restores what the file says. `upload_json` cannot be combined with `keys` or
+  `group_keys`.
+- **Volume and schema check settings are not part of the file.** Set them on `data_quality` as usual;
+  left unset, they take the backend's defaults, which are not the Workbench form's defaults.
+
 ## Import
 
 Import is supported using the following syntax:

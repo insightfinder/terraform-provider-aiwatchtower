@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ var (
 	_ resource.ResourceWithConfigure      = &monitorResource{}
 	_ resource.ResourceWithImportState    = &monitorResource{}
 	_ resource.ResourceWithValidateConfig = &monitorResource{}
+	_ resource.ResourceWithModifyPlan     = &monitorResource{}
 )
 
 func NewMonitorResource() resource.Resource {
@@ -227,6 +229,10 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	hasDataQuality := !dataQuality.IsNull()
 	hasJSON := !settingJSON.IsNull()
 
+	if hasDataQuality && !dataQuality.IsUnknown() {
+		validateDataQualityUpload(ctx, req.Config, &resp.Diagnostics)
+	}
+
 	if hasDataQuality && hasJSON {
 		resp.Diagnostics.AddError(
 			"Conflicting Monitor Setting",
@@ -289,6 +295,11 @@ func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest
 	if plan.UserName.IsNull() || plan.UserName.IsUnknown() || userName == "" {
 		userName = r.client.Username
 		plan.UserName = types.StringValue(userName)
+	}
+
+	resp.Diagnostics.Append(resolveUploadAtApply(ctx, plan.DataQuality)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	config, diags := r.buildMonitorConfig(ctx, plan, userName)
@@ -357,6 +368,11 @@ func (r *monitorResource) Update(ctx context.Context, req resource.UpdateRequest
 		userName = r.client.Username
 	}
 	plan.UserName = types.StringValue(userName)
+
+	resp.Diagnostics.Append(resolveUploadAtApply(ctx, plan.DataQuality)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	config, diags := r.buildMonitorConfig(ctx, plan, userName)
 	resp.Diagnostics.Append(diags...)
@@ -627,6 +643,10 @@ func (r *monitorResource) applyConfigToModel(ctx context.Context, m *monitorReso
 		if diags.HasError() {
 			return diags
 		}
+		// The backend never sees the upload file, so it can only come from the prior state.
+		if dq != nil && m.DataQuality != nil {
+			dq.UploadJSON = m.DataQuality.UploadJSON
+		}
 		m.DataQuality = dq
 		m.SettingJSON = jsontypes.NewNormalizedNull()
 	default:
@@ -670,4 +690,171 @@ func stringOrNullKeepKnown(planned types.String, actual string) types.String {
 		return planned
 	}
 	return stringOrNull(actual)
+}
+
+// ModifyPlan expands upload_json into the planned keys and group_keys, so the plan shows exactly
+// what will be sent, and so a change made in the Workbench shows up as a diff against the file.
+func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+
+	dqPath := path.Root("data_quality")
+	var dataQuality types.Object
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, dqPath, &dataQuality)...)
+	if resp.Diagnostics.HasError() || dataQuality.IsNull() || dataQuality.IsUnknown() {
+		return
+	}
+
+	var upload, groupNameKey, groupRegex types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, dqPath.AtName("upload_json"), &upload)...)
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, dqPath.AtName("group_name_key"), &groupNameKey)...)
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, dqPath.AtName("group_extraction_regex"), &groupRegex)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	keysPath, groupKeysPath := dqPath.AtName("keys"), dqPath.AtName("group_keys")
+
+	switch {
+	case upload.IsUnknown():
+		// Expanded at apply time, once the file is known.
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, keysPath, types.MapUnknown(fieldSettingObjectType()))...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, groupKeysPath, types.MapUnknown(groupFieldsObjectType()))...)
+
+	case upload.IsNull():
+		// keys and group_keys are computed only on behalf of upload_json. Without it they behave as
+		// plain optional attributes: removing them from the configuration removes them.
+		var cfgKeys, cfgGroupKeys types.Map
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, keysPath, &cfgKeys)...)
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, groupKeysPath, &cfgGroupKeys)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if cfgKeys.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, keysPath, types.MapNull(fieldSettingObjectType()))...)
+		}
+		if cfgGroupKeys.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, groupKeysPath, types.MapNull(groupFieldsObjectType()))...)
+		}
+
+	case groupNameKey.IsUnknown() || groupRegex.IsUnknown():
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, keysPath, types.MapUnknown(fieldSettingObjectType()))...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, groupKeysPath, types.MapUnknown(groupFieldsObjectType()))...)
+
+	default:
+		keys, groupKeys, warnings, diags := uploadToModel(ctx, upload.ValueString(), groupNameKey.ValueString(), groupRegex.ValueString())
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if len(warnings) > 0 {
+			resp.Diagnostics.AddAttributeWarning(dqPath.AtName("upload_json"), "Upload JSON Entries Ignored Or Sent As Written",
+				"The Workbench accepts this file and silently drops these entries, or sends them as written. This plan does the same:\n\n- "+
+					strings.Join(warnings, "\n- "))
+		}
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, keysPath, keys)...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, groupKeysPath, groupKeys)...)
+		if !resp.Diagnostics.HasError() {
+			keepBackendDefaultsWhenUnchanged(ctx, req.State, &resp.Plan)
+		}
+	}
+}
+
+// keepBackendDefaultsWhenUnchanged undoes a spurious "known after apply" on the attributes the
+// backend defaults. keys and group_keys are Optional+Computed with plain optional children, so
+// Terraform proposes their configured null rather than the prior value; the framework reads that as
+// a change and marks every computed attribute with a null configuration unknown. ModifyPlan then
+// plans the same keys again from upload_json. If putting the prior defaults back makes the plan
+// identical to the state, nothing is changing and the plan is settled with them; any real change
+// leaves the framework's unknowns alone.
+func keepBackendDefaultsWhenUnchanged(ctx context.Context, state tfsdk.State, plan *tfsdk.Plan) {
+	if state.Raw.IsNull() {
+		return
+	}
+
+	dq := path.Root("data_quality")
+	candidate := *plan
+	var diags diag.Diagnostics
+
+	for _, p := range []path.Path{dq.AtName("volume_detection_mode"), dq.AtName("volume_sensitivity")} {
+		var planned, prior types.String
+		diags.Append(candidate.GetAttribute(ctx, p, &planned)...)
+		diags.Append(state.GetAttribute(ctx, p, &prior)...)
+		if planned.IsUnknown() {
+			diags.Append(candidate.SetAttribute(ctx, p, prior)...)
+		}
+	}
+	for _, p := range []path.Path{dq.AtName("volume_warning_baseline_factor"), dq.AtName("volume_critical_baseline_factor")} {
+		var planned, prior types.Float64
+		diags.Append(candidate.GetAttribute(ctx, p, &planned)...)
+		diags.Append(state.GetAttribute(ctx, p, &prior)...)
+		if planned.IsUnknown() {
+			diags.Append(candidate.SetAttribute(ctx, p, prior)...)
+		}
+	}
+
+	schemaCheck := dq.AtName("schema_check")
+	var plannedCheck, priorCheck types.Object
+	diags.Append(candidate.GetAttribute(ctx, schemaCheck, &plannedCheck)...)
+	diags.Append(state.GetAttribute(ctx, schemaCheck, &priorCheck)...)
+	if diags.HasError() {
+		return
+	}
+	if plannedCheck.IsUnknown() {
+		diags.Append(candidate.SetAttribute(ctx, schemaCheck, priorCheck)...)
+	} else if !plannedCheck.IsNull() {
+		for _, name := range []string{"field_order", "unexpected_fields", "lost_fields"} {
+			var planned, prior types.Bool
+			diags.Append(candidate.GetAttribute(ctx, schemaCheck.AtName(name), &planned)...)
+			diags.Append(state.GetAttribute(ctx, schemaCheck.AtName(name), &prior)...)
+			if planned.IsUnknown() {
+				diags.Append(candidate.SetAttribute(ctx, schemaCheck.AtName(name), prior)...)
+			}
+		}
+	}
+
+	if !diags.HasError() && candidate.Raw.Equal(state.Raw) {
+		*plan = candidate
+	}
+}
+
+// validateDataQualityUpload rejects what no plan could use: an upload file that is not a JSON
+// object, one combined with hand-written keys, and an extraction regex RE2 cannot compile.
+func validateDataQualityUpload(ctx context.Context, config tfsdk.Config, diags *diag.Diagnostics) {
+	dqPath := path.Root("data_quality")
+
+	var upload, groupRegex types.String
+	var keys, groupKeys types.Map
+	diags.Append(config.GetAttribute(ctx, dqPath.AtName("upload_json"), &upload)...)
+	diags.Append(config.GetAttribute(ctx, dqPath.AtName("group_extraction_regex"), &groupRegex)...)
+	diags.Append(config.GetAttribute(ctx, dqPath.AtName("keys"), &keys)...)
+	diags.Append(config.GetAttribute(ctx, dqPath.AtName("group_keys"), &groupKeys)...)
+	if diags.HasError() {
+		return
+	}
+
+	if !groupRegex.IsNull() && !groupRegex.IsUnknown() {
+		if source := strings.TrimSpace(groupRegex.ValueString()); source != "" {
+			if _, err := regexp.Compile(source); err != nil {
+				diags.AddAttributeError(dqPath.AtName("group_extraction_regex"), "Invalid Group Extraction Regex",
+					fmt.Sprintf("%q does not compile: %v. The provider evaluates it with Go's RE2 syntax, which lacks some JavaScript features "+
+						"the Workbench accepts, such as lookbehind and backreferences.", source, err))
+			}
+		}
+	}
+
+	if upload.IsNull() {
+		return
+	}
+	if !keys.IsNull() || !groupKeys.IsNull() {
+		diags.AddAttributeError(dqPath.AtName("upload_json"), "Conflicting Data Quality Rules",
+			"upload_json computes keys and group_keys from the file, so neither may also be set in the configuration.")
+	}
+	if upload.IsUnknown() {
+		return
+	}
+	if err := validateUploadJSON(upload.ValueString()); err != nil {
+		diags.AddAttributeError(dqPath.AtName("upload_json"), "Invalid Upload JSON", err.Error())
+	}
 }

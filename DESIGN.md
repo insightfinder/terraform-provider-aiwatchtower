@@ -480,3 +480,60 @@ kept, because the shape is pinned by both sides' DTOs, but it is untested agains
 A monitor imports as `user_name@monitor_name`, split on the **last** separator so an email address
 user name survives. This is the same rule, and the same trap, as the model resource's three-part
 identifier.
+
+### 7.10 The upload JSON is expanded by the provider
+
+The Workbench's Upload JSON dialog never sends the file to the backend. The browser expands it —
+`dataCheckTypes.ts` for `$dataCheckTypes`, `transformDataToTargetFormat` for the field list,
+`extractGroup` for Auto Grouping, `serializeDataQualityPayload` for the payload — and only the
+resulting `keys` / `groupKeys` reach `POST /api/external/v1/monitor`. So `upload_json` is expanded
+in Go (`dataquality_upload.go`), as a line-by-line port.
+
+**Which fields are sent.** After an upload the Workbench ticks nothing; the user ticks rows by hand,
+and an unticked row is not sent. Terraform has no review step, and
+`getSchemaCheckExpectedFieldsByGroup()` builds the schema check's expected fields from `keys` /
+`groupKeys` alone, so an unsent field is "unexpected" whenever it appears. Every field of the sample
+event is therefore sent, in file order, with `order` as its index. A field gets checks only from
+its `$dataCheckTypes` entry; without one it is sent with `dataQualityTypes: []` — not the
+Workbench's default checks — which keeps it in the expected schema and checks nothing. The one place
+defaults survive is an entry that is not an array, where the Workbench itself falls back to them.
+
+**JavaScript string behaviour.** The port has to copy three details of the Workbench's code, all
+found by comparing its output with the Workbench's own parser over a large set of generated files:
+
+- `trim()` strips U+FEFF and keeps U+0085; Go's `TrimSpace` does the opposite (`jsTrim`).
+- `toLowerCase()` turns `İ` into `i` plus a combining dot, so `"İnvalidValue"` is not a keyword;
+  Go's `ToLower` makes it one (`jsLower`).
+- Auto Grouping runs its regex on the key *before* the serializer trims it.
+
+**Order.** Go maps lose key order, and file order is table order. The file is decoded as a token
+stream, and object keys follow JavaScript's property order: array-index keys first, ascending, then
+insertion order. `{"10": .., "2": ..}` lists `2` first, as the Workbench does.
+
+**Diagnostics.** The Workbench collects diagnostics and discards them (`void diagnostics`), sending
+the payload regardless. The provider sends the same payload and reports the diagnostics as one plan
+warning. Custom regexes are not compiled in Go: they are evaluated by UIE, and RE2 would reject
+valid JavaScript patterns. The extraction regex, which the provider does evaluate, has to compile
+under RE2.
+
+**Plan mechanics.** `keys` and `group_keys` are Optional+Computed so `ModifyPlan` can fill them from
+the file, which makes the plan show the expansion and makes a Workbench edit show up as drift. Two
+consequences:
+
+- Without `upload_json`, `ModifyPlan` plans them null whenever the configuration leaves them null,
+  so they keep plain Optional semantics.
+- Terraform proposes the configured null, not the prior value, for an Optional+Computed attribute
+  whose prior value holds non-computed children (`optionalValueNotComputable`). The framework reads
+  that as a change and marks every computed attribute with a null configuration unknown, so an
+  unchanged monitor would plan its backend-defaulted volume and schema settings as "known after
+  apply" forever. `keepBackendDefaultsWhenUnchanged` puts the prior values back, but only when the
+  result is identical to the state, which is to say only when nothing is changing.
+
+`upload_json` itself is not stored by the backend: Read carries it over from prior state, and an
+import starts without it.
+
+**What the Workbench does that the provider cannot.** On submit the Workbench also sends
+`PUT /api/v1/logjsontype` with every row's JSON type. That endpoint is behind `TokenFilter` (§1). The
+backend derives the same json types from `keys` in `DataQualitySetting.getSettings()`, and since
+every field is sent, every field is covered.
+

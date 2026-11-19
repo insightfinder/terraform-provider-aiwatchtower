@@ -178,6 +178,41 @@ resource "aiwatchtower_monitor" "full" {
   }
 }
 
+# The same JSON file the Workbench's "Upload JSON" dialog accepts: a sample event plus its
+# "$dataCheckTypes". The plan shows the keys it expands to. Every field of the sample event is
+# sent, in file order, so the schema check knows the whole event; fields without an entry get no
+# checks.
+resource "aiwatchtower_monitor" "uploaded" {
+  monitor_name  = "Fraud-Guard-DQ-Uploaded"
+  monitor_type  = "DATA_QUALITY"
+  model_name    = aiwatchtower_model.fraud_guard.model_name
+  model_version = aiwatchtower_model.fraud_guard.model_version
+
+  data_sources = [
+    {
+      name        = "InputLog"
+      data_type   = "Log"
+      data_source = "Custom"
+    },
+  ]
+
+  data_quality = {
+    upload_json = file("${path.module}/data-quality.json")
+
+    # Optional, as the Workbench's "Group by" and Auto Grouping: a field whose name the regex
+    # matches goes to the group its first capture names.
+    # group_name_key         = "merchant"
+    # group_extraction_regex = "^([^@]+)@"
+
+    schema_check_enabled = true
+    schema_check = {
+      field_order       = true
+      lost_fields       = true
+      unexpected_fields = true
+    }
+  }
+}
+
 # Monitor types this provider does not model as typed attributes take their setting as raw JSON.
 resource "aiwatchtower_monitor" "model_drift" {
   monitor_name  = "Fraud-Guard-Model-Drift"
@@ -228,11 +263,13 @@ resource "aiwatchtower_monitor" "model_drift" {
 
 Optional:
 
-- `group_keys` (Attributes Map) Rules that apply only to the events of one group, keyed by the group value. The same field can carry different rules in different groups. (see [below for nested schema](#nestedatt--data_quality--group_keys))
+- `group_extraction_regex` (String) The Workbench's Auto Grouping regex. With upload_json and group_name_key, each field whose name it matches goes to the group named by capture group 1 (or the whole match). Also used by the csv export to strip the group prefix from field names. Evaluated with Go's RE2 syntax, so lookbehind and backreferences are not available.
+- `group_keys` (Attributes Map) Rules that apply only to the events of one group, keyed by the group value. The same field can carry different rules in different groups. Computed from upload_json when that is set. (see [below for nested schema](#nestedatt--data_quality--group_keys))
 - `group_name_key` (String) JSON key of the log event whose value names the group, for example "merchant". Leave unset to run every rule over all events together.
-- `keys` (Attributes Map) Rules that apply to every event regardless of group, keyed by the event's JSON field name. (see [below for nested schema](#nestedatt--data_quality--keys))
+- `keys` (Attributes Map) Rules that apply to every event regardless of group, keyed by the event's JSON field name. Computed from upload_json when that is set. (see [below for nested schema](#nestedatt--data_quality--keys))
 - `schema_check` (Attributes) Which schema sub-checks run. The backend fills in every sub-check left unset as false. (see [below for nested schema](#nestedatt--data_quality--schema_check))
 - `schema_check_enabled` (Boolean) Whether each record is checked against the expected set and order of fields.
+- `upload_json` (String) The Workbench's Upload JSON file, unchanged: a sample log event with an optional top-level "$dataCheckTypes" object. The provider expands it into keys and group_keys as the Workbench does, and the plan shows the result. Every field of the sample event is sent, in file order, so the schema check knows the whole event; a field gets checks only from its $dataCheckTypes entry. Entries the Workbench would ignore are reported as plan warnings. Mutually exclusive with keys and group_keys. Not stored by the backend.
 - `volume_critical_baseline_factor` (Number) How far beyond the baseline band AI mode reports a critical anomaly. Defaults to 1.15.
 - `volume_detection_enabled` (Boolean) Whether the daily record count is compared against an expected volume.
 - `volume_detection_mode` (String) How the volume verdict is reached: AI compares the day against a learned baseline band, MANUAL against the percentages in volume_thresholds. Defaults to AI.
@@ -257,6 +294,7 @@ Optional:
 - `consistency_keys` (Attributes List) Fields whose values must agree for the CONSISTENCY check. Ordered, like the list the backend stores. (see [below for nested schema](#nestedatt--data_quality--group_keys--fields--consistency_keys))
 - `custom_name` (String) Display name of the CUSTOM check.
 - `custom_regex` (String) Expression backing the CUSTOM check.
+- `data_quality_descriptions` (Map of String) Description of a check, keyed by the check name used in data_quality_types. Shown after the check in the Workbench's csv export.
 - `data_quality_types` (Set of String) Checks to run on the field: CONSISTENCY, MISSING_DATA, DATA_OUTLIERS, FIELD_TYPE_MISMATCH, QUALIFIED_DATA_RANGE, CUSTOM, ANOMALOUS_DATA_VALUE. Unordered, like the set the backend stores.
 - `field_type` (String) Type the field's values are read as: STRING, NUMBER or CATEGORY. Required for ANOMALOUS_DATA_VALUE, which the backend accepts on NUMBER fields only.
 - `is_primary_key` (Boolean) Whether the field takes part in the primary key. Records that share the same values of every primary key field within a group and period are flagged as duplicates.
@@ -295,6 +333,7 @@ Optional:
 - `consistency_keys` (Attributes List) Fields whose values must agree for the CONSISTENCY check. Ordered, like the list the backend stores. (see [below for nested schema](#nestedatt--data_quality--keys--consistency_keys))
 - `custom_name` (String) Display name of the CUSTOM check.
 - `custom_regex` (String) Expression backing the CUSTOM check.
+- `data_quality_descriptions` (Map of String) Description of a check, keyed by the check name used in data_quality_types. Shown after the check in the Workbench's csv export.
 - `data_quality_types` (Set of String) Checks to run on the field: CONSISTENCY, MISSING_DATA, DATA_OUTLIERS, FIELD_TYPE_MISMATCH, QUALIFIED_DATA_RANGE, CUSTOM, ANOMALOUS_DATA_VALUE. Unordered, like the set the backend stores.
 - `field_type` (String) Type the field's values are read as: STRING, NUMBER or CATEGORY. Required for ANOMALOUS_DATA_VALUE, which the backend accepts on NUMBER fields only.
 - `is_primary_key` (Boolean) Whether the field takes part in the primary key. Records that share the same values of every primary key field within a group and period are flagged as duplicates.
@@ -396,6 +435,31 @@ Required:
 - `include` (Boolean) Whether matches are included (true) or excluded (false).
 - `keyword` (String) The keyword to match.
 - `type` (String) What the keyword is matched against, for example a field name.
+
+## Configuring a data quality monitor from the Workbench's Upload JSON file
+
+`data_quality.upload_json` takes the same file the Workbench's **Upload JSON** dialog accepts — a
+sample log event with an optional top-level `"$dataCheckTypes"` object — and expands it exactly as
+the Workbench does, including `desc` descriptions, `when`/`fill` regex configuration, `type:`
+declarations and `primaryKey`. The plan lists the resulting `keys` (and `group_keys`), so review it
+the way you would review the Workbench's preview.
+
+- **Every field of the sample event is sent, in file order.** The schema check compares records
+  against the fields a monitor carries, so every field is enabled. A field gets checks only from
+  its `$dataCheckTypes` entry; a field without one, or with `[]`, is sent with no checks. (The
+  Workbench instead leaves rows unticked after an upload and gives a ticked row without an entry
+  its default checks.)
+- **Entries the Workbench would silently drop are plan warnings**, not errors: a check that does not
+  apply to the field type, an unknown keyword, a malformed `range` threshold or `custom` check, a
+  `$dataCheckTypes` key that matches no field. The plan sends what the Workbench would send.
+- **Grouping needs both `group_name_key` and `group_extraction_regex`**, as the Workbench needs both
+  "Group by" and Auto Grouping. The regex runs with Go's RE2 syntax, so lookbehind and
+  backreferences are not available; a pattern RE2 cannot compile fails validation.
+- **The file is the source of truth.** A rule changed in the Workbench shows up as a diff on the next
+  plan, and applying restores what the file says. `upload_json` cannot be combined with `keys` or
+  `group_keys`.
+- **Volume and schema check settings are not part of the file.** Set them on `data_quality` as usual;
+  left unset, they take the backend's defaults, which are not the Workbench form's defaults.
 
 ## Import
 
