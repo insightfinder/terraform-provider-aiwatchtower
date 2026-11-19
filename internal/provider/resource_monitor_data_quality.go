@@ -8,6 +8,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
@@ -35,6 +36,8 @@ type fieldSettingModel struct {
 	ConsistencyKeys  []consistencyKeyModel        `tfsdk:"consistency_keys"`
 	Order            types.Int64                  `tfsdk:"order"`
 	IsPrimaryKey     types.Bool                   `tfsdk:"is_primary_key"`
+
+	DataQualityDescriptions map[string]types.String `tfsdk:"data_quality_descriptions"`
 }
 
 type groupFieldsModel struct {
@@ -72,9 +75,13 @@ type schemaCheckModel struct {
 }
 
 type dataQualityModel struct {
-	GroupNameKey types.String                 `tfsdk:"group_name_key"`
-	Keys         map[string]fieldSettingModel `tfsdk:"keys"`
-	GroupKeys    map[string]groupFieldsModel  `tfsdk:"group_keys"`
+	UploadJSON           types.String `tfsdk:"upload_json"`
+	GroupNameKey         types.String `tfsdk:"group_name_key"`
+	GroupExtractionRegex types.String `tfsdk:"group_extraction_regex"`
+	// map[string]fieldSettingModel and map[string]groupFieldsModel. They are framework maps rather
+	// than Go maps because a plan holds them unknown until upload_json is expanded.
+	Keys      types.Map `tfsdk:"keys"`
+	GroupKeys types.Map `tfsdk:"group_keys"`
 
 	VolumeDetectionEnabled       types.Bool             `tfsdk:"volume_detection_enabled"`
 	VolumeDetectionMode          types.String           `tfsdk:"volume_detection_mode"`
@@ -155,8 +162,33 @@ func fieldSettingNestedObject() schema.NestedAttributeObject {
 				Description: "Whether the field takes part in the primary key. Records that share the same values of every primary key field within a group and period are flagged as duplicates.",
 				Optional:    true,
 			},
+			"data_quality_descriptions": schema.MapAttribute{
+				Description: "Description of a check, keyed by the check name used in data_quality_types. Shown after the check in the Workbench's csv export.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
 		},
 	}
+}
+
+func groupFieldsNestedObject() schema.NestedAttributeObject {
+	return schema.NestedAttributeObject{
+		Attributes: map[string]schema.Attribute{
+			"fields": schema.MapNestedAttribute{
+				Description:  "Rules for this group, keyed by the event's JSON field name.",
+				Required:     true,
+				NestedObject: fieldSettingNestedObject(),
+			},
+		},
+	}
+}
+
+func fieldSettingObjectType() attr.Type {
+	return fieldSettingNestedObject().Type()
+}
+
+func groupFieldsObjectType() attr.Type {
+	return groupFieldsNestedObject().Type()
 }
 
 func dataQualitySchema() schema.SingleNestedAttribute {
@@ -164,27 +196,34 @@ func dataQualitySchema() schema.SingleNestedAttribute {
 		Description: "Settings of a DATA_QUALITY monitor. Mutually exclusive with monitor_setting_json, and the only supported form for this monitor type.",
 		Optional:    true,
 		Attributes: map[string]schema.Attribute{
+			"upload_json": schema.StringAttribute{
+				Description: "The Workbench's Upload JSON file, unchanged: a sample log event with an optional top-level \"$dataCheckTypes\" object. " +
+					"The provider expands it into keys and group_keys as the Workbench does, and the plan shows the result. Every field of the sample event is sent, " +
+					"in file order, so the schema check knows the whole event; a field gets checks only from its $dataCheckTypes entry. " +
+					"Entries the Workbench would ignore are reported as plan warnings. Mutually exclusive with keys and group_keys. Not stored by the backend.",
+				Optional: true,
+			},
 			"group_name_key": schema.StringAttribute{
 				Description: "JSON key of the log event whose value names the group, for example \"merchant\". Leave unset to run every rule over all events together.",
 				Optional:    true,
 			},
+			"group_extraction_regex": schema.StringAttribute{
+				Description: "The Workbench's Auto Grouping regex. With upload_json and group_name_key, each field whose name it matches goes to the group named by " +
+					"capture group 1 (or the whole match). Also used by the csv export to strip the group prefix from field names. " +
+					"Evaluated with Go's RE2 syntax, so lookbehind and backreferences are not available.",
+				Optional: true,
+			},
 			"keys": schema.MapNestedAttribute{
-				Description:  "Rules that apply to every event regardless of group, keyed by the event's JSON field name.",
+				Description:  "Rules that apply to every event regardless of group, keyed by the event's JSON field name. Computed from upload_json when that is set.",
 				Optional:     true,
+				Computed:     true,
 				NestedObject: fieldSettingNestedObject(),
 			},
 			"group_keys": schema.MapNestedAttribute{
-				Description: "Rules that apply only to the events of one group, keyed by the group value. The same field can carry different rules in different groups.",
-				Optional:    true,
-				NestedObject: schema.NestedAttributeObject{
-					Attributes: map[string]schema.Attribute{
-						"fields": schema.MapNestedAttribute{
-							Description:  "Rules for this group, keyed by the event's JSON field name.",
-							Required:     true,
-							NestedObject: fieldSettingNestedObject(),
-						},
-					},
-				},
+				Description:  "Rules that apply only to the events of one group, keyed by the group value. The same field can carry different rules in different groups. Computed from upload_json when that is set.",
+				Optional:     true,
+				Computed:     true,
+				NestedObject: groupFieldsNestedObject(),
 			},
 			"volume_detection_enabled": schema.BoolAttribute{
 				Description: "Whether the daily record count is compared against an expected volume.",
@@ -326,11 +365,20 @@ func dataQualityToClient(ctx context.Context, m *dataQualityModel) (*client.Data
 
 	setting := client.NewDataQualitySetting()
 	setting.GroupNameKey = stringPtr(m.GroupNameKey)
-	setting.Keys = fieldSettingsToClient(m.Keys)
+	setting.DataQualityGroupExtractionRegex = stringPtr(m.GroupExtractionRegex)
 
-	if len(m.GroupKeys) > 0 {
-		setting.GroupKeys = make(map[string]map[string]client.DataQualityFieldSetting, len(m.GroupKeys))
-		for group, fields := range m.GroupKeys {
+	keys, d := fieldSettingsFromMap(ctx, m.Keys)
+	diags.Append(d...)
+	groupKeys, d := groupFieldsFromMap(ctx, m.GroupKeys)
+	diags.Append(d...)
+	if diags.HasError() {
+		return nil, diags
+	}
+
+	setting.Keys = fieldSettingsToClient(keys)
+	if len(groupKeys) > 0 {
+		setting.GroupKeys = make(map[string]map[string]client.DataQualityFieldSetting, len(groupKeys))
+		for group, fields := range groupKeys {
 			setting.GroupKeys[group] = fieldSettingsToClient(fields.Fields)
 		}
 	}
@@ -401,9 +449,20 @@ func fieldSettingsToClient(fields map[string]fieldSettingModel) map[string]clien
 			Threshold:    stringPtr(f.Threshold),
 			Order:        int64Ptr(f.Order),
 			IsPrimaryKey: boolPtr(f.IsPrimaryKey),
+
+			DataQualityTypes: make([]string, 0, len(f.DataQualityTypes)),
 		}
 		for _, t := range f.DataQualityTypes {
 			setting.DataQualityTypes = append(setting.DataQualityTypes, t.ValueString())
+		}
+		for check, text := range f.DataQualityDescriptions {
+			if text.IsNull() || text.IsUnknown() {
+				continue
+			}
+			if setting.DataQualityDescriptions == nil {
+				setting.DataQualityDescriptions = make(map[string]string, len(f.DataQualityDescriptions))
+			}
+			setting.DataQualityDescriptions[check] = text.ValueString()
 		}
 		if len(f.RegexConfig) > 0 {
 			setting.RegexConfig = make(map[string]client.DataQualityRegexSetting, len(f.RegexConfig))
@@ -432,9 +491,18 @@ func dataQualityFromClient(ctx context.Context, setting *client.DataQualitySetti
 		return nil, diags
 	}
 
+	keys, d := fieldSettingsToMap(ctx, fieldSettingsFromClient(setting.Keys))
+	diags.Append(d...)
+	if diags.HasError() {
+		return nil, diags
+	}
+
 	m := &dataQualityModel{
+		UploadJSON:                   types.StringNull(),
 		GroupNameKey:                 stringFromPtr(setting.GroupNameKey),
-		Keys:                         fieldSettingsFromClient(setting.Keys),
+		GroupExtractionRegex:         stringFromPtr(setting.DataQualityGroupExtractionRegex),
+		Keys:                         keys,
+		GroupKeys:                    types.MapNull(groupFieldsObjectType()),
 		VolumeDetectionEnabled:       boolFromPtr(setting.VolumeDetectionEnabled),
 		VolumeDetectionMode:          stringFromPtr(setting.VolumeDetectionMode),
 		VolumeSensitivity:            stringFromPtr(setting.VolumeSensitivity),
@@ -446,9 +514,14 @@ func dataQualityFromClient(ctx context.Context, setting *client.DataQualitySetti
 	}
 
 	if len(setting.GroupKeys) > 0 {
-		m.GroupKeys = make(map[string]groupFieldsModel, len(setting.GroupKeys))
+		groups := make(map[string]groupFieldsModel, len(setting.GroupKeys))
 		for group, fields := range setting.GroupKeys {
-			m.GroupKeys[group] = groupFieldsModel{Fields: fieldSettingsFromClient(fields)}
+			groups[group] = groupFieldsModel{Fields: fieldSettingsFromClient(fields)}
+		}
+		m.GroupKeys, d = groupFieldsToMap(ctx, groups)
+		diags.Append(d...)
+		if diags.HasError() {
+			return nil, diags
 		}
 	}
 
@@ -524,6 +597,12 @@ func fieldSettingsFromClient(fields map[string]client.DataQualityFieldSetting) m
 				Key:   types.StringValue(ck.Key),
 				Value: stringFromPtr(ck.Value),
 			})
+		}
+		if len(f.DataQualityDescriptions) > 0 {
+			model.DataQualityDescriptions = make(map[string]types.String, len(f.DataQualityDescriptions))
+			for check, text := range f.DataQualityDescriptions {
+				model.DataQualityDescriptions[check] = types.StringValue(text)
+			}
 		}
 		out[name] = model
 	}
@@ -610,6 +689,12 @@ func fillComputedDataQuality(ctx context.Context, planned *dataQualityModel, act
 // clearUnknownDataQuality settles every computed attribute as null, for the paths that have to
 // write state without having read the monitor back.
 func clearUnknownDataQuality(m *dataQualityModel) {
+	if m.Keys.IsUnknown() {
+		m.Keys = types.MapNull(fieldSettingObjectType())
+	}
+	if m.GroupKeys.IsUnknown() {
+		m.GroupKeys = types.MapNull(groupFieldsObjectType())
+	}
 	if m.VolumeDetectionMode.IsUnknown() {
 		m.VolumeDetectionMode = types.StringNull()
 	}
@@ -707,4 +792,74 @@ func stringValues(values []string) []types.String {
 		out = append(out, types.StringValue(v))
 	}
 	return out
+}
+
+func fieldSettingsFromMap(ctx context.Context, m types.Map) (map[string]fieldSettingModel, diag.Diagnostics) {
+	if m.IsNull() || m.IsUnknown() {
+		return nil, nil
+	}
+	out := map[string]fieldSettingModel{}
+	diags := m.ElementsAs(ctx, &out, false)
+	return out, diags
+}
+
+func fieldSettingsToMap(ctx context.Context, fields map[string]fieldSettingModel) (types.Map, diag.Diagnostics) {
+	if len(fields) == 0 {
+		return types.MapNull(fieldSettingObjectType()), nil
+	}
+	return types.MapValueFrom(ctx, fieldSettingObjectType(), fields)
+}
+
+func groupFieldsFromMap(ctx context.Context, m types.Map) (map[string]groupFieldsModel, diag.Diagnostics) {
+	if m.IsNull() || m.IsUnknown() {
+		return nil, nil
+	}
+	out := map[string]groupFieldsModel{}
+	diags := m.ElementsAs(ctx, &out, false)
+	return out, diags
+}
+
+func groupFieldsToMap(ctx context.Context, groups map[string]groupFieldsModel) (types.Map, diag.Diagnostics) {
+	if len(groups) == 0 {
+		return types.MapNull(groupFieldsObjectType()), nil
+	}
+	return types.MapValueFrom(ctx, groupFieldsObjectType(), groups)
+}
+
+// uploadToModel expands upload_json into the planned keys and group_keys.
+func uploadToModel(ctx context.Context, raw, groupNameKey, groupExtractionRegex string) (keys, groupKeys types.Map, warnings []string, diags diag.Diagnostics) {
+	expansion, err := expandDataQualityUpload(raw, groupNameKey, groupExtractionRegex)
+	if err != nil {
+		diags.AddAttributeError(path.Root("data_quality").AtName("upload_json"), "Invalid Upload JSON", err.Error())
+		return types.MapNull(fieldSettingObjectType()), types.MapNull(groupFieldsObjectType()), nil, diags
+	}
+
+	keys, d := fieldSettingsToMap(ctx, fieldSettingsFromClient(expansion.Keys))
+	diags.Append(d...)
+
+	groups := make(map[string]groupFieldsModel, len(expansion.GroupKeys))
+	for group, fields := range expansion.GroupKeys {
+		groups[group] = groupFieldsModel{Fields: fieldSettingsFromClient(fields)}
+	}
+	groupKeys, d = groupFieldsToMap(ctx, groups)
+	diags.Append(d...)
+
+	return keys, groupKeys, expansion.Warnings, diags
+}
+
+// resolveUploadAtApply expands upload_json when the plan could not, because the file, the group key
+// or the extraction regex was only known at apply time.
+func resolveUploadAtApply(ctx context.Context, m *dataQualityModel) diag.Diagnostics {
+	if m == nil || m.UploadJSON.IsNull() || m.UploadJSON.IsUnknown() {
+		return nil
+	}
+	if !m.Keys.IsUnknown() && !m.GroupKeys.IsUnknown() {
+		return nil
+	}
+	keys, groupKeys, _, diags := uploadToModel(ctx, m.UploadJSON.ValueString(), knownString(m.GroupNameKey), knownString(m.GroupExtractionRegex))
+	if diags.HasError() {
+		return diags
+	}
+	m.Keys, m.GroupKeys = keys, groupKeys
+	return diags
 }

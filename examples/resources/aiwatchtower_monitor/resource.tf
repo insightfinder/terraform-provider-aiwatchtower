@@ -164,6 +164,41 @@ resource "aiwatchtower_monitor" "full" {
   }
 }
 
+# The same JSON file the Workbench's "Upload JSON" dialog accepts: a sample event plus its
+# "$dataCheckTypes". The plan shows the keys it expands to. Every field of the sample event is
+# sent, in file order, so the schema check knows the whole event; fields without an entry get no
+# checks.
+resource "aiwatchtower_monitor" "uploaded" {
+  monitor_name  = "Fraud-Guard-DQ-Uploaded"
+  monitor_type  = "DATA_QUALITY"
+  model_name    = aiwatchtower_model.fraud_guard.model_name
+  model_version = aiwatchtower_model.fraud_guard.model_version
+
+  data_sources = [
+    {
+      name        = "InputLog"
+      data_type   = "Log"
+      data_source = "Custom"
+    },
+  ]
+
+  data_quality = {
+    upload_json = file("${path.module}/data-quality.json")
+
+    # Optional, as the Workbench's "Group by" and Auto Grouping: a field whose name the regex
+    # matches goes to the group its first capture names.
+    # group_name_key         = "merchant"
+    # group_extraction_regex = "^([^@]+)@"
+
+    schema_check_enabled = true
+    schema_check = {
+      field_order       = true
+      lost_fields       = true
+      unexpected_fields = true
+    }
+  }
+}
+
 # Monitor types this provider does not model as typed attributes take their setting as raw JSON.
 resource "aiwatchtower_monitor" "model_drift" {
   monitor_name  = "Fraud-Guard-Model-Drift"

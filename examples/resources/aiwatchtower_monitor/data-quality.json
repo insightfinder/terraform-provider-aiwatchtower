@@ -1,0 +1,76 @@
+{
+  "transactionId": "TXN123456789",
+  "timestamp": "2024-11-20T10:30:00Z",
+  "status": "SUCCESS",
+  "details": {
+    "amount": 125.5,
+    "currency": "USD",
+    "type": "PURCHASE",
+    "description": "Payment for Order #ORD987654"
+  },
+  "customerId": "CUST0012345",
+  "customerName": "Jane Doe",
+  "customerEmail": "jane.doe@example.com",
+
+  "$dataCheckTypes": {
+    "transactionId": [
+      "primaryKey",
+      { "missing": { "desc": "Primary key — must never be empty or null." } },
+      "custom:txn_id_format=^TXN\\d{9}$"
+    ],
+    "timestamp": [
+      "missing",
+      "custom:iso8601_utc=^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    ],
+    "customerId": [
+      "missing",
+      "consistency:status=SUCCESS",
+      "consistency:details->type=^(PURCHASE|REFUND)$",
+      "custom:customer_id_format=^CUST\\d{7}$"
+    ],
+    "customerEmail": [
+      "missing",
+      "custom:email_format=^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    ],
+    "customerName": [
+      {
+        "missing": {
+          "when": { "status": "SUCCESS" },
+          "fill": { "customerName": "^(N/A|Unknown|-)?$" }
+        }
+      }
+    ],
+    "details->description": [],
+    "details->type": ["type:categorical"],
+
+    "details->amount": [
+      "missing",
+      "typeMismatch",
+      "anomalous",
+      { "range": { "threshold": ">0", "desc": "Amount must be positive; refunds are tracked on a separate field." } },
+      "consistency:details->currency=USD",
+      "custom:two_decimals=^\\d+(\\.\\d{1,2})?$",
+      {
+        "invalidValue": {
+          "when": { "status": "SUCCESS", "details->type": "PURCHASE" }
+        }
+      }
+    ],
+
+    "status": [
+      "type:categorical",
+      "missing",
+      { "invalidValue": { "desc": "Flag any status outside the allowed enum values." } },
+      "typeMismatch",
+      "consistency:details->type=PURCHASE",
+      "custom:status_enum=^(SUCCESS|FAILED|PENDING)$"
+    ],
+    "details->currency": [
+      "type:categorical",
+      "missing",
+      "invalidValue",
+      "typeMismatch",
+      "custom:iso_currency=^[A-Z]{3}$"
+    ]
+  }
+}

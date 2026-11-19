@@ -16,15 +16,17 @@ type ConsistencyKey struct {
 }
 
 type DataQualityFieldSetting struct {
-	FieldType        *string                            `json:"fieldType,omitempty"`
-	DataQualityTypes []string                           `json:"dataQualityTypes,omitempty"`
-	RegexConfig      map[string]DataQualityRegexSetting `json:"regexConfig,omitempty"`
-	CustomRegex      *string                            `json:"customRegex,omitempty"`
-	CustomName       *string                            `json:"customName,omitempty"`
-	Threshold        *string                            `json:"threshold,omitempty"`
-	ConsistencyKeys  []ConsistencyKey                   `json:"consistencyKeys,omitempty"`
-	Order            *int64                             `json:"order,omitempty"`
-	IsPrimaryKey     *bool                              `json:"isPrimaryKey,omitempty"`
+	FieldType *string `json:"fieldType,omitempty"`
+	// Always sent, as the UI does: a field with no checks still belongs to the expected schema.
+	DataQualityTypes        []string                           `json:"dataQualityTypes"`
+	RegexConfig             map[string]DataQualityRegexSetting `json:"regexConfig,omitempty"`
+	CustomRegex             *string                            `json:"customRegex,omitempty"`
+	CustomName              *string                            `json:"customName,omitempty"`
+	Threshold               *string                            `json:"threshold,omitempty"`
+	ConsistencyKeys         []ConsistencyKey                   `json:"consistencyKeys,omitempty"`
+	Order                   *int64                             `json:"order,omitempty"`
+	IsPrimaryKey            *bool                              `json:"isPrimaryKey,omitempty"`
+	DataQualityDescriptions map[string]string                  `json:"dataQualityDescriptions,omitempty"`
 }
 
 type VolumeThresholds struct {
@@ -75,6 +77,8 @@ type DataQualitySetting struct {
 
 	SchemaCheckEnabled *bool        `json:"schemaCheckEnabled,omitempty"`
 	SchemaCheck        *SchemaCheck `json:"schemaCheck,omitempty"`
+
+	DataQualityGroupExtractionRegex *string `json:"dataQualityGroupExtractionRegex,omitempty"`
 }
 
 func NewDataQualitySetting() *DataQualitySetting {

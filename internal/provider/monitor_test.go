@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestParseMonitorImportIDRejectsMalformedIDs(t *testing.T) {
 func dataQualityFixture() *dataQualityModel {
 	return &dataQualityModel{
 		GroupNameKey: types.StringValue("merchant"),
-		Keys: map[string]fieldSettingModel{
+		Keys: mustFieldMap(map[string]fieldSettingModel{
 			"amount": {
 				FieldType:        types.StringValue("NUMBER"),
 				DataQualityTypes: []types.String{types.StringValue("MISSING_DATA"), types.StringValue("ANOMALOUS_DATA_VALUE")},
@@ -59,9 +60,13 @@ func dataQualityFixture() *dataQualityModel {
 				ConsistencyKeys: []consistencyKeyModel{{Key: types.StringValue("currency"), Value: types.StringValue("USD")}},
 				Order:           types.Int64Value(1),
 				IsPrimaryKey:    types.BoolValue(true),
+				DataQualityDescriptions: map[string]types.String{
+					"MISSING_DATA": types.StringValue("Never empty."),
+				},
 			},
-		},
-		GroupKeys: map[string]groupFieldsModel{
+		}),
+		GroupExtractionRegex: types.StringValue("^([^@]+)@"),
+		GroupKeys: mustGroupMap(map[string]groupFieldsModel{
 			"Walmart": {Fields: map[string]fieldSettingModel{
 				"sku": {
 					FieldType:        types.StringValue("STRING"),
@@ -70,7 +75,7 @@ func dataQualityFixture() *dataQualityModel {
 					IsPrimaryKey:     types.BoolNull(),
 				},
 			}},
-		},
+		}),
 		VolumeDetectionEnabled:       types.BoolValue(true),
 		VolumeDetectionMode:          types.StringValue("MANUAL"),
 		VolumeThresholds:             &volumeThresholdsModel{Warning: types.Float64Value(15), Critical: types.Float64Value(30)},
@@ -132,9 +137,24 @@ func TestDataQualityRoundTripsThroughTheClientShape(t *testing.T) {
 		t.Errorf("GroupNameKey = %v, want %v", out.GroupNameKey, in.GroupNameKey)
 	}
 
-	amount, ok := out.Keys["amount"]
+	outKeys, diags := fieldSettingsFromMap(ctx, out.Keys)
+	if diags.HasError() {
+		t.Fatalf("reading keys back: %v", diags)
+	}
+	outGroups, diags := groupFieldsFromMap(ctx, out.GroupKeys)
+	if diags.HasError() {
+		t.Fatalf("reading group_keys back: %v", diags)
+	}
+	if out.GroupExtractionRegex != types.StringValue("^([^@]+)@") {
+		t.Errorf("GroupExtractionRegex = %v, want it to round-trip", out.GroupExtractionRegex)
+	}
+
+	amount, ok := outKeys["amount"]
 	if !ok {
-		t.Fatalf("Keys = %+v, want an 'amount' entry", out.Keys)
+		t.Fatalf("Keys = %+v, want an 'amount' entry", outKeys)
+	}
+	if amount.DataQualityDescriptions["MISSING_DATA"] != types.StringValue("Never empty.") {
+		t.Errorf("DataQualityDescriptions = %v, want the MISSING_DATA description", amount.DataQualityDescriptions)
 	}
 	if len(amount.DataQualityTypes) != 2 {
 		t.Errorf("DataQualityTypes = %v, want two entries", amount.DataQualityTypes)
@@ -153,9 +173,9 @@ func TestDataQualityRoundTripsThroughTheClientShape(t *testing.T) {
 		t.Errorf("RegexConfig = %+v, want the CUSTOM condition regex", amount.RegexConfig)
 	}
 
-	sku, ok := out.GroupKeys["Walmart"].Fields["sku"]
+	sku, ok := outGroups["Walmart"].Fields["sku"]
 	if !ok {
-		t.Fatalf("GroupKeys = %+v, want Walmart/sku", out.GroupKeys)
+		t.Fatalf("GroupKeys = %+v, want Walmart/sku", outGroups)
 	}
 	if sku.Order != types.Int64Value(2) {
 		t.Errorf("GroupKeys Walmart/sku order = %v, want 2", sku.Order)
@@ -456,4 +476,20 @@ func TestValidateConfigRejectsDataQualityOnAnotherMonitorType(t *testing.T) {
 	if !found {
 		t.Errorf("diagnostics = %v, want data_quality refused on a MODEL_DRIFT monitor", resp.Diagnostics.Errors())
 	}
+}
+
+func mustFieldMap(fields map[string]fieldSettingModel) types.Map {
+	m, diags := fieldSettingsToMap(context.Background(), fields)
+	if diags.HasError() {
+		panic(fmt.Sprintf("building keys: %v", diags))
+	}
+	return m
+}
+
+func mustGroupMap(groups map[string]groupFieldsModel) types.Map {
+	m, diags := groupFieldsToMap(context.Background(), groups)
+	if diags.HasError() {
+		panic(fmt.Sprintf("building group_keys: %v", diags))
+	}
+	return m
 }
