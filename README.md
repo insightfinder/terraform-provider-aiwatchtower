@@ -74,6 +74,22 @@ See [the resource docs](docs/resources/model.md) for the full field list.
 - [`aiwatchtower_model`](docs/resources/model.md) - Manage AI WatchTower models
 - [`aiwatchtower_monitor`](docs/resources/monitor.md) - Manage AI WatchTower monitors, including the full settings of a data quality monitor
 
+## Airgapped Environments
+
+`scripts/airgap/prepare-bundle.sh`, run from the repository root, builds
+`dist/airgap/aw-airgap-bundle.tgz`: the provider, the configuration in `examples/airgap`, and a
+script for the first run. The provider sits in the bundle's own `terraform.d/` folder, which
+Terraform searches automatically, so the airgapped machine needs only Terraform: no internet, no
+`~/.terraformrc` and no admin rights.
+
+```bash
+scripts/airgap/prepare-bundle.sh               # ARCH=arm64 for ARM targets; CONFIG_DIR picks another config
+# on the airgapped machine
+tar xzf aw-airgap-bundle.tgz && cd aw-airgap-bundle
+# set AW_BASE_URL / AW_USERNAME / AW_API_KEY (environment, or the top of run-aw-terraform.sh)
+./run-aw-terraform.sh
+```
+
 ## Reliability
 
 Every API call is bounded by a 60-second per-attempt timeout and is cancelled when Terraform is
