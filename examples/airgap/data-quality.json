@@ -1,0 +1,70 @@
+{
+	"group": "group",
+	"group1@field1": "abc",
+	"group1@field2": 345,
+	"group2@field3": 123,
+	"$dataCheckTypes": {
+		"group1@field1": [
+			{
+				"missing": {
+					"desc": "String field; must never be empty or null."
+				}
+			},
+			{
+				"custom": {
+					"name": "three_lowercase",
+					"regex": "^[a-z]{3}$",
+					"desc": "Must be exactly three lowercase letters (e.g. abc)."
+				}
+			}
+		],
+		"group1@field2": [
+			{
+				"missing": {
+					"desc": "Numerical field; must never be empty or null."
+				}
+			},
+			{
+				"typeMismatch": {
+					"desc": "Must be a number; flag strings like 'N/A'."
+				}
+			},
+			{
+				"anomalous": {
+					"desc": "Flag values far outside the field's normal range."
+				}
+			},
+			{
+				"custom": {
+					"name": "three_digit_int",
+					"regex": "^\\d{3}$",
+					"desc": "Must be exactly three digits (e.g. 345)."
+				}
+			}
+		],
+		"group2@field3": [
+			{
+				"missing": {
+					"desc": "Numerical field; must never be empty or null."
+				}
+			},
+			{
+				"typeMismatch": {
+					"desc": "Must be a number; flag strings like 'unknown'."
+				}
+			},
+			{
+				"anomalous": {
+					"desc": "Flag values far outside the field's normal range."
+				}
+			},
+			{
+				"custom": {
+					"name": "three_digit_int",
+					"regex": "^\\d{3}$",
+					"desc": "Must be exactly three digits (e.g. 123)."
+				}
+			}
+		]
+	}
+}
