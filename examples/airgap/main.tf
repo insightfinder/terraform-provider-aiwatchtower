@@ -46,5 +46,13 @@ resource "aiwatchtower_monitor" "data_quality" {
       unexpected_fields = true
       lost_fields       = true
     }
+
+    # Volume detection, as the Workbench sets it up by default. Creates the <project>-L2M project.
+    volume_detection_enabled        = true
+    volume_detection_mode           = "AI"          # or "MANUAL", with volume_thresholds below
+    volume_sensitivity              = "MEDIUM_HIGH" # HIGH, MEDIUM_HIGH, MEDIUM, MEDIUM_LOW or LOW
+    volume_warning_baseline_factor  = 1.25          # AI mode: 1 <= warning <= critical <= 100
+    volume_critical_baseline_factor = 1.5
+    # volume_thresholds = { warning = 20, critical = 40 } # MANUAL mode: percent, 0 < warning <= critical <= 100
   }
 }
